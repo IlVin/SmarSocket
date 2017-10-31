@@ -1,6 +1,10 @@
 
 // Code from http://arduino.ru/forum/obshchii/gy-712-30a-udalennyi-kontrol-peremennogo-toka
 // Code is ugly, but it works...
+//
+//
+// https://github.com/openenergymonitor/EmonLib
+//
 
 #define   PIN_FAZA1   A5 // Куда воткнут датчик тока на первой фазе
 #define   PIN_FAZA2   A6 // Куда воткнут датчик тока на второй фазе

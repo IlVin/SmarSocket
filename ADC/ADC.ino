@@ -1,12 +1,12 @@
 // http://codius.ru/articles/Arduino_%D1%83%D1%81%D0%BA%D0%BE%D1%80%D1%8F%D0%B5%D0%BC_%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%83_%D0%BF%D0%BB%D0%B0%D1%82%D1%8B_%D0%A7%D0%B0%D1%81%D1%82%D1%8C_2_%D0%90%D0%BD%D0%B0%D0%BB%D0%BE%D0%B3%D0%BE_%D1%86%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9_%D0%BF%D1%80%D0%B5%D0%BE%D0%B1%D1%80%D0%B0%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C_%D0%90%D0%A6%D0%9F_%D0%B8_analogRead
 // http://www.gaw.ru/html.cgi/txt/doc/micros/avr/arh128/12.htm
 
-
 // pinList - Циклический буфер с ID пинов, работающих в режиме АЦП
 #define PINBUF_SZ 8
-volatile int8_t pinListSize = PINBUF_SZ;                               // Размер буфера
-volatile int8_t pinList[PINBUF_SZ] = {A0, A1, A2, A3, A4, A5, A6, A7}; // Буфер
-volatile int8_t curPin = 0;                                            // Указатель на в данный момент оцифровываемый пин
+volatile uint8_t pinListSize = PINBUF_SZ;                               // Размер буфера
+volatile uint8_t pinList[PINBUF_SZ] = {A0, A1, A2, A3, A4, A5, A6, A7}; // Буфер
+volatile uint16_t pinValues[PINBUF_SZ] = {0};                           // Значения пинов
+volatile uint8_t curPin = 0;                                            // Указатель на в данный момент оцифрованный пин
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -56,15 +56,18 @@ volatile int8_t curPin = 0;                                            // Ука
 //      MUX[3:0]: B0000, B0001, B0010, B0011, B0100, B0101, B0110, B0111, B1000, B1110,      B1111
 //      Source  : ADC0,  ADC1,  ADC2,  ADC3,  ADC4,  ADC5,  ADC6,  ADC7,  Temp,  VBG(1.1В),  GND(0В)
 
+inline uint8_t pin(uint8_t pinNum) {
+    return pinNum % pinListSize;
+}
 
 inline void SetupADCSRA() {
     // ADEN      = [1]   - Подать питание на АЦП
     // ADSC      = [1]   - Стартовать АЦП c инициализацией
     // ADATE     = [1]   - Оцифровка по срабатываению триггера ADTS[2:0]
     // ADIF      = [0]   - флаг прерывания от компаратора
-    // ADIE      = [0]   - разрешение прерывания от компаратора
+    // ADIE      = [1]   - разрешение прерывания от компаратора
     // ADPS[2:0] = [110] - Коэффициент делителя частоты АЦП K = 64
-    ADCSRA = B11100110;
+    ADCSRA = B11101110;
 }
 
 inline void SetupADCSRB() {
@@ -83,8 +86,27 @@ inline void SetupADMUX(uint8_t SRC = 0){
 
 inline void StartAdc() {
     SetupADCSRB();
-    SetupADMUX();
-    SetupADCSRA(); // Старт АЦП
+
+    curPin = 0;
+    SetupADMUX(curPin);
+
+    SetupADCSRA();               // Старт АЦП
+    // АЦП начал оцифровывать пин curPin
+    SetupADMUX(pin(curPin + 1)); // Записываем в буфер номер следующего пина,
+                                 // который АЦП будет оцифровывать во время прерывания
+}
+
+/* **** Interrupt service routine **** */
+// Биты MUXn и REFS1:0 в регистре ADMUX поддерживают одноступенчатую буферизацию через временный регистр.
+// Поэтому изменения вступают в силу в безопасный момент -  в течение одного такта синхронизации АЦП перед оцифровкой сигнала.
+// Если выполнено чтение ADCL, то доступ к этим регистрам для АЦП будет заблокирован, пока не будет считан регистр ADCH.
+ISR(ADC_vect){
+    pinValues[curPin] = ADCL;       // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
+    pinValues[curPin] |= ADCH << 8; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
+    // curPin указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
+    // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
+    curPin = ADMUX & B00001111;    // В следующем прерывании будет готов результат для пина из ADMUX
+    SetupADMUX(pin(curPin + 1));   // Кладем в буфер номер следующего пина
 }
 
 // Установка режима пинов
@@ -94,13 +116,20 @@ inline void SetupPins() {
     };
 }
 
-
 void setup() {
+  Serial.begin(9600);
   SetupPins();
   StartAdc();
 }
 
 void loop() {
-//  Serial.println(analogRead(pinIn));
-//  delay(1000);
+    for (int i = 0; i < pinListSize; i++) {
+        Serial.print("pinList[");
+        Serial.print(i);
+        Serial.print("] = ");
+        Serial.print(pinList[i]);
+        Serial.print("; ");
+    }
+    Serial.println("");
+    delay(1000);
 }

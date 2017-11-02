@@ -2,6 +2,7 @@
 // http://www.gaw.ru/html.cgi/txt/doc/micros/avr/arh128/12.htm
 // https://geektimes.ru/post/263024/
 // https://habrahabr.ru/post/321008/
+// https://code.google.com/archive/p/arduino-timerone/downloads
 
 
 // pinList - Циклический буфер с ID пинов, работающих в режиме АЦП
@@ -12,8 +13,9 @@ volatile uint16_t pinValues[PINBUF_SZ] = {0};                           // Зн�
 volatile uint8_t curPin = 0;                                            // Указатель на в данный момент оцифрованный пин
 
 // True RMS
-uint32_t rmsBuf[PINBUF_SZ * 256] = {0};   // Буфер с 256 выборками квадратов значений
-uint8_t curRms = 0;
+#define RMSBUF_SZ 1000
+volatile uint16_t rmsBuf[PINBUF_SZ * RMSBUF_SZ] = {0};   // Буфер с 1000 выборками значений
+volatile uint16_t curRms = 0;
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -130,25 +132,26 @@ ISR(ADC_vect){
     rmsBuf[curPin * 256 + curRms] = (uint32_t)pinValues[curPin] * (uint32_t)pinValues[curPin];
 }
 
+/* ************ TIMER ***************** */
+// http://narodstream.ru/avr-urok-10-tajmery-schetchiki-preryvaniya/
+//
+// TCNTn - Счетчик тиков таймера
+// OCRnA, OCRnB - Числа, с которыми сравнивается TCNTn
+// TCCRn = TCCRnA + TCCRnB - Регистр управления, устанавливаемый регистровой парой
+// TIMSKn - Маски прерываний
+
+
 // https://github.com/radiolok/arduino_rms_count/blob/master/Urms_calc/Urms_calc.pde
-void SetupTimer(){
-    //set up TIMER0 to  4096Hz
-    //TIMER0_OVF will be the trigger for ADC
-    /* normal mode, prescaler 16
-        16MHz / 64 / 61 = 4098 Hz 0.04% to 4096Hz */
-    TCCR0B = (1 << CS01)|(1 << CS00);//timer frequency = clk/64
-    OCR0A = 60;//61-1
-    TIMSK0 = (1<<OCIE0A);
+void SetupTimer() {
+    TCCR1B |= (1<<WGM12); // устанавливаем режим СТС (сброс по совпадению)
+    TIMSK1 = (1<<OCIE1A); // Прерывание типа [TIMER1 COMPA] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1A(H и L))
+    OCR1A = 16000;        // Прерываемся 1000 раз в секунду (16MHz / 1000)
+    TCCR1B |= (1<<CS10);  // Делитель [1]
 }
 
-
-ISR(TIMER0_COMPA_vect){
-    if (PIND & (1<<PD2)) {
-        PORTD &= ~(1<<PD2);
-    } else {
-        PORTD |=(1<<PD2);
-    }
-    TCNT0 = 0;
+ISR(TIMER1_COMPA_vect){
+    rmsBuf[curPin * RMSBUF_SZ + curRms] = pinList[curPin];
+    curRms = (curRms + 1) % RMSBUF_SZ;
 }
 
 // Установка режима пинов

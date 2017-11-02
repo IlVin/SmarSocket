@@ -1,12 +1,19 @@
 // http://codius.ru/articles/Arduino_%D1%83%D1%81%D0%BA%D0%BE%D1%80%D1%8F%D0%B5%D0%BC_%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%83_%D0%BF%D0%BB%D0%B0%D1%82%D1%8B_%D0%A7%D0%B0%D1%81%D1%82%D1%8C_2_%D0%90%D0%BD%D0%B0%D0%BB%D0%BE%D0%B3%D0%BE_%D1%86%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9_%D0%BF%D1%80%D0%B5%D0%BE%D0%B1%D1%80%D0%B0%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C_%D0%90%D0%A6%D0%9F_%D0%B8_analogRead
 // http://www.gaw.ru/html.cgi/txt/doc/micros/avr/arh128/12.htm
+// https://geektimes.ru/post/263024/
+// https://habrahabr.ru/post/321008/
+
 
 // pinList - Циклический буфер с ID пинов, работающих в режиме АЦП
 #define PINBUF_SZ 8
-volatile uint8_t pinListSize = PINBUF_SZ;                               // Размер буфера
+const uint8_t pinListSize = PINBUF_SZ;                                  // Размер буфера
 volatile uint8_t pinList[PINBUF_SZ] = {A0, A1, A2, A3, A4, A5, A6, A7}; // Буфер
 volatile uint16_t pinValues[PINBUF_SZ] = {0};                           // Значения пинов
 volatile uint8_t curPin = 0;                                            // Указатель на в данный момент оцифрованный пин
+
+// True RMS
+uint32_t rmsBuf[PINBUF_SZ * 256] = {0};   // Буфер с 256 выборками квадратов значений
+uint8_t curRms = 0;
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -68,12 +75,6 @@ inline uint8_t pin(uint8_t pinNum) {
     return pinNum % pinListSize;
 }
 
-
-inline void SetupSREG(bool enable_interrupts = true) {
-    // SREG.I = [1] - прерывания разрешены
-    SREG = enable_interrupts ? (SREG | B10000000) : (SREG & ~B10000000);
-}
-
 inline void SetupADCSRA() {
     // ADEN      = [1]   - Подать питание на АЦП
     // ADSC      = [1]   - Стартовать АЦП c инициализацией
@@ -99,16 +100,17 @@ inline void SetupADMUX(uint8_t SRC = 0){
 }
 
 inline void StartAdc() {
-    SetupSREG();
     SetupADCSRB();
 
     curPin = 0;
     SetupADMUX(curPin);
-
+    uint8_t oldSREG = SREG;
+    sei();                       // Прерывания нужно разрешить
     SetupADCSRA();               // Старт АЦП
     // АЦП начал оцифровывать пин curPin
     SetupADMUX(pin(curPin + 1)); // Записываем в буфер номер следующего пина,
                                  // который АЦП будет оцифровывать во время прерывания
+    SREG = oldSREG;
 }
 
 /* **** Interrupt service routine **** */
@@ -118,10 +120,34 @@ inline void StartAdc() {
 ISR(ADC_vect){
     pinValues[curPin] = ADCL;       // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
     pinValues[curPin] |= ADCH << 8; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
+
     // curPin указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
     // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
     curPin = ADMUX & B00001111;    // В следующем прерывании будет готов результат для пина из ADMUX
     SetupADMUX(pin(curPin + 1));   // Кладем в буфер номер следующего пина
+
+    // Вычисление квадратов
+    rmsBuf[curPin * 256 + curRms] = (uint32_t)pinValues[curPin] * (uint32_t)pinValues[curPin];
+}
+
+void SetupTimer(){
+    //set up TIMER0 to  4096Hz
+    //TIMER0_OVF will be the trigger for ADC
+    /* normal mode, prescaler 16
+        16MHz / 64 / 61 = 4098 Hz 0.04% to 4096Hz */
+    TCCR0B = (1 << CS01)|(1 << CS00);//timer frequency = clk/64
+    OCR0A = 60;//61-1
+    TIMSK0 = (1<<OCIE0A);
+}
+
+
+ISR(TIMER0_COMPA_vect){
+    if (PIND & (1<<PD2)) {
+        PORTD &= ~(1<<PD2);
+    } else {
+        PORTD |=(1<<PD2);
+    }
+    TCNT0 = 0;
 }
 
 // Установка режима пинов

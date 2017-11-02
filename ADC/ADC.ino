@@ -130,6 +130,7 @@ ISR(ADC_vect){
     rmsBuf[curPin * 256 + curRms] = (uint32_t)pinValues[curPin] * (uint32_t)pinValues[curPin];
 }
 
+// https://github.com/radiolok/arduino_rms_count/blob/master/Urms_calc/Urms_calc.pde
 void SetupTimer(){
     //set up TIMER0 to  4096Hz
     //TIMER0_OVF will be the trigger for ADC

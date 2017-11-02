@@ -142,7 +142,7 @@ ISR(ADC_vect){
 
 
 // https://github.com/radiolok/arduino_rms_count/blob/master/Urms_calc/Urms_calc.pde
-void SetupTimer() {
+inline void SetupTimer1() {
     TCCR1B |= (1<<WGM12); // устанавливаем режим СТС (сброс по совпадению)
     TIMSK1 = (1<<OCIE1A); // Прерывание типа [TIMER1 COMPA] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1A(H и L))
     OCR1A = 16000;        // Прерываемся 1000 раз в секунду (16MHz / 1000)
@@ -165,6 +165,7 @@ void setup() {
   Serial.begin(9600);
   SetupPins();
   StartAdc();
+  SetupTimer1();
 }
 
 void loop() {

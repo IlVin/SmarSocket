@@ -3,19 +3,15 @@
 // https://geektimes.ru/post/263024/
 // https://habrahabr.ru/post/321008/
 // https://code.google.com/archive/p/arduino-timerone/downloads
-
+// http://wiki.openmusiclabs.com/wiki/ArduinoFHT
 
 // pinList - Циклический буфер с ID пинов, работающих в режиме АЦП
 #define PINBUF_SZ 8
 const uint8_t pinListSize = PINBUF_SZ;                                  // Размер буфера
 volatile uint8_t pinList[PINBUF_SZ] = {A0, A1, A2, A3, A4, A5, A6, A7}; // Буфер
 volatile uint16_t pinValues[PINBUF_SZ] = {0};                           // Значения пинов
+volatile uint16_t pinRms[PINBUF_SZ] = {0};                              // RMS для пинов
 volatile uint8_t curPin = 0;                                            // Указатель на в данный момент оцифрованный пин
-
-// True RMS
-#define RMSBUF_SZ 1000
-volatile uint16_t rmsBuf[PINBUF_SZ * RMSBUF_SZ] = {0};   // Буфер с 1000 выборками значений
-volatile uint16_t curRms = 0;
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -120,39 +116,148 @@ inline void StartAdc() {
 // Поэтому изменения вступают в силу в безопасный момент -  в течение одного такта синхронизации АЦП перед оцифровкой сигнала.
 // Если выполнено чтение ADCL, то доступ к этим регистрам для АЦП будет заблокирован, пока не будет считан регистр ADCH.
 ISR(ADC_vect){
-    pinValues[curPin] = ADCL;       // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
-    pinValues[curPin] |= ADCH << 8; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
-
+    uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
+    uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
+    pinValues[curPin] = (hi << 8) | lo;
     // curPin указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
     // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
     curPin = ADMUX & B00001111;    // В следующем прерывании будет готов результат для пина из ADMUX
     SetupADMUX(pin(curPin + 1));   // Кладем в буфер номер следующего пина
+}
 
-    // Вычисление квадратов
-    rmsBuf[curPin * 256 + curRms] = (uint32_t)pinValues[curPin] * (uint32_t)pinValues[curPin];
+// WAVE SAMPLE
+#define V0 0x0200
+#define WAVE_SAMPLE_SZ 500
+volatile uint8_t wavePin = 0; // Указывает номер пина из pinList, для которого строится сэмпл
+volatile uint8_t waveSample[WAVE_SAMPLE_SZ] = {0};
+volatile uint16_t curWS = 0;
+volatile uint32_t tcnt = 0;
+volatile uint32_t prevTcnt = 0;
+
+ISR(TIMER1_COMPA_vect){
+    if (curWS < WAVE_SAMPLE_SZ) {
+        uint16_t val = pinValues[wavePin];       // Читаем мгновенное значение пина
+        if (val < V0) {
+            waveSample[curWS] = (uint8_t)(((V0 - val) >> 1) & 0x00FF);
+        } else {
+            waveSample[curWS] = (uint8_t)(((val - V0) >> 1) & 0x00FF);
+        }
+        curWS++;
+        tcnt++;
+    } else {
+        // Останавливаем таймер
+        StopTimer1();
+        sei();
+        pinRms[wavePin] = CalcRMS();
+        wavePin = pin(wavePin + 1);
+        curWS = 0;
+        StartTimer1();
+    }
 }
 
 /* ************ TIMER ***************** */
 // http://narodstream.ru/avr-urok-10-tajmery-schetchiki-preryvaniya/
 //
-// TCNTn - Счетчик тиков таймера
-// OCRnA, OCRnB - Числа, с которыми сравнивается TCNTn
-// TCCRn = TCCRnA + TCCRnB - Регистр управления, устанавливаемый регистровой парой
-// TIMSKn - Маски прерываний
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | Регистры | Биты                                                          |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// |          |   7   |   6   |   5   |   4   |   3   |   2   |   1   |   0   |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | TCNTn    | Количество тиков таймера                                      |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | OCRnA    | Младший байт значения останова счетчика                       |
+// +----------+---------------+-------+-------+-------+-------+-------+-------+
+// | OCRnB    | Старший байт значения останова счетчика                       |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | TCCRnA   | COMnA1| COMnA0| COMnB1| COMnB0| COMnC1| COMnC0| WGMn1 | WGMn0 |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | TCCRnB   | ICNCn | ICESn |   x   | WGMn3 | WGMn2 | CSn2  | CSn1  | CSn0  |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | TCCRnC   | FOCnA | FOCnB |   x   |   x   |   x   |   x   |   x   |   x   |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | TIMSKn   |   x   |   x   | ICIEn |   x   | OCIEnC| OCIEnB| OCIEnA| TOIEn |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// TCNTn = TCNTnH[15:8] + TCNTnL[7:0] - Счетчик тиков таймера
+// OCRnA = OCRnAH[15:8] + OCRnAL[7:0], OCRnB = OCRnBH[15:8] + OCRnBL[7:0] - Числа, с которыми сравнивается TCNTn
+// TCCRnA - Timer/Counter Control Register A
+//      COMnA1,COMnA0, COMnB1 и COMnB0 - контролируют поведение выводов OC1A и OC1B
+//      FOC1A, FOC1B, WGM11 и WGM10 служат для задания работы ТС1 как широтно-импульсного модулятора.
+// TCCRnB - Timer/Counter Control Register B
+//      ICNCn - Input Capture Noise Canceler (for PWM)
+//      ICESn - Input Capture Edge Select    (for PWM)
+//      WGMn[3:2] - Waveform Generation Mode (for PWM)
+//      CSn[2:0]  - Clock Select
+//      +------+------+------+--------------------------------------------------------+
+//      | CSn2 | CSn1 | CSn0 | Description                                            |
+//      +------+------+------+--------------------------------------------------------+
+//      |  0   |  0   |  0   | No clock source. (Timer/Counter stopped)               |
+//      |  0   |  0   |  1   | CLK/1                                                  |
+//      |  0   |  1   |  0   | CLK/8                                                  |
+//      |  0   |  1   |  1   | CLK/64                                                 |
+//      |  1   |  0   |  0   | CLK/256                                                |
+//      |  1   |  0   |  1   | CLK/1024                                               |
+//      |  1   |  1   |  0   | External clock source on Tn pin. Clock on falling edge |
+//      |  1   |  1   |  1   | External clock source on Tn pin. Clock on rising edge  |
+//      +------+------+------+--------------------------------------------------------+
+
+// FOCnA  - Force Output Compare for Channel A
+// TIMSKn - Timer/Counter Interrupt Mask Register
+//      TICIEn - Timer/Countern, Input Capture Interrupt Enable
+//      OCIEnC - Timer/Countern, Output Compare C Match Interrupt Enable
+//      OCIEnB - Timer/Countern, Output Compare B Match Interrupt Enable
+//      OCIEnA - Timer/Countern, Output Compare A Match Interrupt Enable
+//      TOIEn  - Timer/Countern, Overflow Interrupt Enable
 
 
 // https://github.com/radiolok/arduino_rms_count/blob/master/Urms_calc/Urms_calc.pde
-inline void SetupTimer1() {
-    TCCR1B |= (1<<WGM12); // устанавливаем режим СТС (сброс по совпадению)
-    TIMSK1 = (1<<OCIE1A); // Прерывание типа [TIMER1 COMPA] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1A(H и L))
-    OCR1A = 16000;        // Прерываемся 1000 раз в секунду (16MHz / 1000)
-    TCCR1B |= (1<<CS10);  // Делитель [1]
+
+#define WAVE_FREQ 40         // Частота исследуемой волны
+#define CPU_FREQ 16000000    // Частота процессора
+
+inline void StartTimer1() {
+    // COMnA1 = [0] - контролируют поведение выводов OCnA
+    // COMnA0 = [0] - контролируют поведение выводов OCnA
+    // COMnB1 = [0] - контролируют поведение выводов OCnB
+    // COMnB0 = [0] - контролируют поведение выводов OCnB
+    // COMnC1 = [0] - контролируют поведение выводов OCnC
+    // COMnC0 = [0] - контролируют поведение выводов OCnC
+    // WGMn1  = [0] - Режим СТС (сброс по совпадению) WGMn = [0100]
+    // WGMn0  = [0] - Режим СТС (сброс по совпадению) WGMn = [0100]
+    TCCR1A = B00000000;
+
+    // x      = [0]
+    // x      = [0]
+    // ICIE1  = [0] - Input Capture Interrupt Enable
+    // x      = [0]
+    // OCIE1C = [0] - Прерывание типа [TIMER1 COMPC] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1C(H и L))
+    // OCIE1B = [0] - Прерывание типа [TIMER1 COMPB] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1B(H и L))
+    // OCIE1A = [1] - Прерывание типа [TIMER1 COMPA] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1A(H и L))
+    // TOIE1  = [0] - процессор реагирует на сигнал переполнения ТС1 и вызывает прерывание.
+    TIMSK1 = B00000010;
+
+    // IF OCRnA == TCNTn THEN INTERRUPT
+    OCR1A = CPU_FREQ / (WAVE_SAMPLE_SZ * WAVE_FREQ);
+    //OCR1A = 1600;
+
+    // ICNC1 = [0] - PWM
+    // ICES1 = [0] - PWM
+    //   x   = [0]
+    // WGM13 = [0] - Режим СТС (сброс по совпадению) WGMn = [0100]
+    // WGM12 = [1] - Режим СТС (сброс по совпадению) WGMn = [0100]
+    // CS12  = [0] - Делитель (CLK/1) CSn = [001] [101]
+    // CS11  = [0] - Делитель (CLK/1) CSn = [001]
+    // CS10  = [1] - Делитель (CLK/1) CSn = [001]
+    TCCR1B = B00001001;
 }
 
-ISR(TIMER1_COMPA_vect){
-    rmsBuf[curPin * RMSBUF_SZ + curRms] = pinList[curPin];
-    curRms = (curRms + 1) % RMSBUF_SZ;
+inline void StopTimer1() {
+      TCCR1B = 0;
 }
+
+uint16_t CalcRMS() {
+    return 0;
+}
+
 
 // Установка режима пинов
 inline void SetupPins() {
@@ -165,15 +270,17 @@ void setup() {
   Serial.begin(9600);
   SetupPins();
   StartAdc();
-  SetupTimer1();
+  StartTimer1();
 }
 
 void loop() {
-    for (int i = 0; i < pinListSize; i++) {
-        Serial.print("pinList[");
-        Serial.print(i);
-        Serial.print("] = ");
-        Serial.print(pinList[i]);
+    Serial.print(tcnt-prevTcnt);
+    prevTcnt = tcnt;
+    Serial.print(",  ");
+    Serial.print(OCR1A);
+    Serial.print(": ");
+    for (int i = 0; i < 33; i++) {
+        Serial.print(waveSample[i]);
         Serial.print("; ");
     }
     Serial.println("");

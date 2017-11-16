@@ -1,3 +1,6 @@
+
+#include <Wire.h>
+
 // http://codius.ru/articles/Arduino_%D1%83%D1%81%D0%BA%D0%BE%D1%80%D1%8F%D0%B5%D0%BC_%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%83_%D0%BF%D0%BB%D0%B0%D1%82%D1%8B_%D0%A7%D0%B0%D1%81%D1%82%D1%8C_2_%D0%90%D0%BD%D0%B0%D0%BB%D0%BE%D0%B3%D0%BE_%D1%86%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9_%D0%BF%D1%80%D0%B5%D0%BE%D0%B1%D1%80%D0%B0%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C_%D0%90%D0%A6%D0%9F_%D0%B8_analogRead
 // http://www.gaw.ru/html.cgi/txt/doc/micros/avr/arh128/12.htm
 // https://geektimes.ru/post/263024/
@@ -251,7 +254,7 @@ inline void StartTimer1() {
 }
 
 inline void StopTimer1() {
-      TCCR1B = 0;
+    TCCR1B = 0;
 }
 
 uint16_t CalcRMS() {
@@ -266,100 +269,75 @@ inline void SetupPins() {
     };
 }
 
-/* *************************************************************
- *                      SPI                                    *
- ************************************************************* */
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | Регистры | Биты                                                          |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// |          |   7   |   6   |   5   |   4   |   3   |   2   |   1   |   0   |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// |  SPCR    | SPIE  |  SPE  | DORD  | MSTR  | CPOL  | CPHA  | SPR1  | SPR0  |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// |  SPSR    | SPIF  | WCOL  |   x   |   x   |   x   |   x   |   x   | SPI2X |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// |  SPDR    |       |       |       |       |       |       |       |       |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 
-// SPCR  SPI Control Register
-//      SPIE - [1] - SPI Interrupt Enable
-//             После окончания передачи байта будет сгенерировано прерывание.
-//      SPE  - [1] - SPI Enable
-//             ATmega328P: SS->10; MOSI->11; MISO->12; SCK->13
-//      DORD - Data Order
-//             [0] - MSB [Hi][Lo]
-//             [1] - LSB [Lo][Hi]
-//      MSTR - Master/Slave Select
-//             [0] - SLAVE
-//             [1] - MASTER
-//      CPOL - Clock Polarity
-//             [0] - SCK is LOW when IDLE
-//             [1] - SCK is HIGH when IDLE
-//             +------+--------------+---------------+
-//             | CPOL | Leading Edge | Trailing Edge |
-//             +------+--------------+---------------+
-//             |  0   |  Rising      |  Falling      |
-//             |  1   |  Falling     |  Rising       |
-//             +------+--------------+---------------+
-//      CPHA - Clock Phase
-//             +------+----------------------+----------------------+
-//             | CPHA | Leading (first) Edge | Trailing (last) Edge |
-//             +------+----------------------+----------------------+
-//             |  0   |        Sample        |       Setup          |
-//             |  1   |        Setup         |       Sample         |
-//             +------+----------------------+----------------------+
-//      SPR1 - Скорость передачи данных по SPI
-//      SPR0 - Скорость передачи данных по SPI
+/* ******************************
+ *        Wire Interface        *
+ ****************************** */
+// Wire библиотека оперирует понятиями:
+// 1) MASTER запросил массив байт
+// 2) MASTER прислал массив байт
+// Так как у нас по протоколу "общаются" системы разных архитектур: 32bit & 8bit
+// то имеет смысл описывать структуру передаваемых данных в платформонезависимом виде:
 
-// SPSR  SPI Status Register
-//      SPIF  - [R] SPI Interrupt Flag
-//              [0] - Initial value
-//              [1] - Передача байта данных по MOSI закончена
-//      WCOL  - [R] Write COLlision Flag
-//              [0] - Initial value
-//              [1] - В бит устанавливается единица, если во время передачи данных
-//                    выполняется попытка записи в регистр данных SPDR
-//      SPI2X - [RW] Double SPI Speed Bit
-//              [0] - Single Speed:  Clock Rate = CR([SPR1][SPR0])
-//              [1] - Double speed:  Clock Rate = CR([SPR1][SPR0])/2
-//              +-------+------+------+-------------+
-//              | SPI2X | SPR1 | SPR0 | Делитель CR |
-//              +-------+------+------+-------------+
-//              |   0   |  0   |  0   |     4       |
-//              |   0   |  0   |  1   |     16      |
-//              |   0   |  1   |  0   |     64      |
-//              |   0   |  1   |  1   |     128     |
-//              |   1   |  0   |  0   |     2       |
-//              |   1   |  0   |  1   |     8       |
-//              |   1   |  1   |  0   |     32      |
-//              |   1   |  1   |  1   |     64      |
-//              +-------+------+------+-------------+
+// --=== ПАКЕТ ===--
+// Пакет - это определенным образом закодированная подпоследовательность байтов вида:
+// [Id][Data1]...[DataK]
+// uint8_t [Id]    - Идентификатор пакета
+// uint8_t [Data*] - Байты данных. Количество байт данных определяется [Id] (от 0 до K)
 
-// SPDR  Регистр данных
+// ---== ПЕРЕДАЧА ТЕЛЕМЕТРИИ от SLAVE к MASTER ==---
+// Для передачи показаний АЦП используются пакеты вида [Id][DataHi][DataLo]
+// Вся телеметрия представляет собой последовательность из N пакетов:
+// [Id1][DataHi1][DataLo1] .. [IdN][DataHiN][DataLoN]
+// [Id*] - идентификатор пакета
+// [DataHi*][DataLo*] - старший и младший байты значения датчика.
+//            Телеметрия передается как знаковое 16 битное число - int16_t
+// int16_t VALUE = static_cast<int16_t>((static_cast<uint16_t>([DataHi]) << 8) | static_cast<uint16_t>([DataLo]))
 
-inline void StartSPI() {
-    // SPIE = [1] - SPI Interrupt Enable
-    // SPE =  [1] - SPI Enable: SS->10; MOSI->11; MISO->12; SCK->13
-    // DORD = [0] - Data Order:          [0] - MSB [Hi][Lo];         [1] - LSB [Lo][Hi]
-    // MSTR = [0] - Master/Slave Select: [0] - SLAVE;                [1] - MASTER
-    // CPOL = [0] - Clock Polarity:      [0] - SCK is LOW when IDLE; [1] - SCK is HIGH when IDLE
-    // CPHA = [0] - Clock Phase
-    // SPR1 = [0] - Скорость передачи данных по SPI: CR = 16
-    // SPR0 = [1] - Скорость передачи данных по SPI: CR = 16
-    SPCR = B11000001;
+// ---== ПЕРЕДАЧА КОМАНД от MASTER к SLAVE ==---
+// Телеметрия переданная мастером является командами для SLAVE и имеет тот же формат
 
-    // [7654321] = [0]
-    // SPI2X = [0] - Double Speed Bit:   [0] - CR([SPR1][SPR0]);     [1] - CR([SPR1][SPR0])/2
-    SPSR = B00000000;
+// ---== Формат Id ==---
+// Id поделен на 2 части: старшую и младшую.
+// Первая часть задает тип телеметрии/команды, а вторая номер ноги:
+// [*][*][*][*][*][*][*][*]
+// [   TYPE   ][    PIN   ]
+// 0x0* - Тестовый вывод
+// 0x1* - Мгновенное значение аналогового пина [*]
+// 0x2* - Максимальное значение аналогового пина [*] за последний период
+// 0x[3456789ACDE]* - Зарезервированы
+// 0xF* - Значение цифрового пина [*]
+//        Значениями цифровых пинов могут быть - 0 или 1. Все, что не 0, то является 1.
+
+void WireOnRequest() {
+    for (byte Id = 0x00; Id < 0x03; ++Id) {
+        Wire.write(Id);
+        Wire.write('H');
+        Wire.write('i');
+    }
 }
+
+void WireOnReceive() {
+    Serial.print("Wire OnReceive: ");
+    while (0 < Wire.available()) { // loop through all but the last
+        uint8_t c = Wire.read(); // receive byte as a character
+        Serial.print(c);         // print the byte
+        Serial.print(", ");
+    }
+    Serial.println("");
+}
+
+/* *************************************** */
 
 
 void setup() {
-  Serial.begin(9600);
-  SetupPins();
-  StartAdc();
-  StartTimer1();
-
+    Serial.begin(9600);
+    SetupPins();
+    StartAdc();
+    StartTimer1();
+    Wire.begin(0x0A);
+    Wire.onRequest(WireOnRequest);
+    Wire.onReceive(WireOnReceive);
 }
 
 void loop() {

@@ -266,11 +266,100 @@ inline void SetupPins() {
     };
 }
 
+/* *************************************************************
+ *                      SPI                                    *
+ ************************************************************* */
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | Регистры | Биты                                                          |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// |          |   7   |   6   |   5   |   4   |   3   |   2   |   1   |   0   |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// |  SPCR    | SPIE  |  SPE  | DORD  | MSTR  | CPOL  | CPHA  | SPR1  | SPR0  |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// |  SPSR    | SPIF  | WCOL  |   x   |   x   |   x   |   x   |   x   | SPI2X |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// |  SPDR    |       |       |       |       |       |       |       |       |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+
+// SPCR  SPI Control Register
+//      SPIE - [1] - SPI Interrupt Enable
+//             После окончания передачи байта будет сгенерировано прерывание.
+//      SPE  - [1] - SPI Enable
+//             ATmega328P: SS->10; MOSI->11; MISO->12; SCK->13
+//      DORD - Data Order
+//             [0] - MSB [Hi][Lo]
+//             [1] - LSB [Lo][Hi]
+//      MSTR - Master/Slave Select
+//             [0] - SLAVE
+//             [1] - MASTER
+//      CPOL - Clock Polarity
+//             [0] - SCK is LOW when IDLE
+//             [1] - SCK is HIGH when IDLE
+//             +------+--------------+---------------+
+//             | CPOL | Leading Edge | Trailing Edge |
+//             +------+--------------+---------------+
+//             |  0   |  Rising      |  Falling      |
+//             |  1   |  Falling     |  Rising       |
+//             +------+--------------+---------------+
+//      CPHA - Clock Phase
+//             +------+----------------------+----------------------+
+//             | CPHA | Leading (first) Edge | Trailing (last) Edge |
+//             +------+----------------------+----------------------+
+//             |  0   |        Sample        |       Setup          |
+//             |  1   |        Setup         |       Sample         |
+//             +------+----------------------+----------------------+
+//      SPR1 - Скорость передачи данных по SPI
+//      SPR0 - Скорость передачи данных по SPI
+
+// SPSR  SPI Status Register
+//      SPIF  - [R] SPI Interrupt Flag
+//              [0] - Initial value
+//              [1] - Передача байта данных по MOSI закончена
+//      WCOL  - [R] Write COLlision Flag
+//              [0] - Initial value
+//              [1] - В бит устанавливается единица, если во время передачи данных
+//                    выполняется попытка записи в регистр данных SPDR
+//      SPI2X - [RW] Double SPI Speed Bit
+//              [0] - Single Speed:  Clock Rate = CR([SPR1][SPR0])
+//              [1] - Double speed:  Clock Rate = CR([SPR1][SPR0])/2
+//              +-------+------+------+-------------+
+//              | SPI2X | SPR1 | SPR0 | Делитель CR |
+//              +-------+------+------+-------------+
+//              |   0   |  0   |  0   |     4       |
+//              |   0   |  0   |  1   |     16      |
+//              |   0   |  1   |  0   |     64      |
+//              |   0   |  1   |  1   |     128     |
+//              |   1   |  0   |  0   |     2       |
+//              |   1   |  0   |  1   |     8       |
+//              |   1   |  1   |  0   |     32      |
+//              |   1   |  1   |  1   |     64      |
+//              +-------+------+------+-------------+
+
+// SPDR  Регистр данных
+
+inline void StartSPI() {
+    // SPIE = [1] - SPI Interrupt Enable
+    // SPE =  [1] - SPI Enable: SS->10; MOSI->11; MISO->12; SCK->13
+    // DORD = [0] - Data Order:          [0] - MSB [Hi][Lo];         [1] - LSB [Lo][Hi]
+    // MSTR = [0] - Master/Slave Select: [0] - SLAVE;                [1] - MASTER
+    // CPOL = [0] - Clock Polarity:      [0] - SCK is LOW when IDLE; [1] - SCK is HIGH when IDLE
+    // CPHA = [0] - Clock Phase
+    // SPR1 = [0] - Скорость передачи данных по SPI: CR = 16
+    // SPR0 = [1] - Скорость передачи данных по SPI: CR = 16
+    SPCR = B11000001;
+
+    // [7654321] = [0]
+    // SPI2X = [0] - Double Speed Bit:   [0] - CR([SPR1][SPR0]);     [1] - CR([SPR1][SPR0])/2
+    SPSR = B00000000;
+}
+
+
 void setup() {
   Serial.begin(9600);
   SetupPins();
   StartAdc();
   StartTimer1();
+
 }
 
 void loop() {

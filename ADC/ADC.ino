@@ -9,10 +9,11 @@
 // https://code.google.com/archive/p/arduino-timerone/downloads
 // http://wiki.openmusiclabs.com/wiki/ArduinoFHT
 
+template <typename T>
 class TFifoIndex {
-    size_t bufSize;
-    size_t head;
-    size_t tail;
+    T bufSize;
+    T head;
+    T tail;
 
     public:
     TFifo (size_t bufSize): bufSize(bufSize), head(0), tail(0) { }
@@ -26,39 +27,37 @@ class TFifoIndex {
         return head == ((tail + 1) % bufSize);
     }
 
-    size_t CalcHead (size_t forward = 0) {
-        return (head + forward) % bufSize;
+    T CalcHeadFwd (T fwd = 1) {
+        return (head + fwd) % bufSize;
     }
 
-    size_t GetHead (size_t forward = 0) {
-        size_t pos = head;
-        head = CalcHead(forward);
-        return pos;
+    void HeadFwd (T fwd = 1) {
+        head = CalcHeadFwd(fwd);
     }
 
-    size_t CalcTail (size_t forward = 0) {
-        return (tail + forward) % bufSize;
+    T CalcTailFwd (size_t fwd = 0) {
+        return (tail + fwd) % bufSize;
     }
 
-    void GetTail(size_t forward = 0) {
-        size_t pos = tail;
-        tail = CalcTail(forward);
-        return pos;
+    void TailFwd (T fwd = 1) {
+        head = CalcTailFwd(fwd);
     }
 
-    size_t size() {
+    T size() {
         return (head + bufSize - tail) % bufSize;
     }
 };
 
 
-#define PINLST_SZ 8                                                       // Размер списка пинов
-volatile uint8_t  aPinList[PINBUF_SZ] = {A0, A1, A2, A3, A4, A5, A6, A7}; // Список аналоговых пинов
-volatile uint16_t aPinCurVal[PINBUF_SZ] = {0};                            // Мгновенные значения пинов
-volatile uint16_t aPinMax[PINBUF_SZ] = {0};                               // Максимальные значения пинов
-volatile uint16_t aPinClcMax[PINBUF_SZ] = {0};                            // Буфер для вычисления aPinMax
+#define PINLST_SZ 8                                                         // Размер списка пинов
+// К этим переменным доступ 
+volatile uint8_t aPinList[PINBUF_SZ] = { A0, A1, A2, A3, A4, A5, A6, A7 }; // Список аналоговых пинов
+volatile uint16_t aPinCurVal[PINBUF_SZ] = { 0 };                           // Мгновенные значения пинов
+volatile static uint16_t aPinMax[PINBUF_SZ] = { 0 };                       // Максимальные значения пинов
+volatile static uint16_t aPinMin[PINBUF_SZ] = { 0 };                       // Минимальные значения пинов
 
-volatile TFifoIndex aPinIdx {PIN_SZ};  // Индексатор аналоговых пинов: aPinIdx.head - ISR ADC; aPinIdx.tail - ISR Timer
+
+volatile TFifoIndex<uint8_t> aPinIdx {PIN_SZ};  // Индексатор аналоговых пинов: aPinIdx.head - ISR ADC; aPinIdx.tail - ISR Timer
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -128,30 +127,28 @@ inline void SetupADCSRA() {
 }
 
 inline void SetupADCSRB() {
-    // ADTS[2:0] = [000]   - Free Running mode
-    // xxxxx     = [00000] - Резервные биты
+    //        ADTS[2:0] = [000]   - Free Running mode
+    //        |||xxxxx  = [00000] - Резервные биты
+    //        ||||||||
     ADCSRB = B00000000;
 }
 
 inline void SetupADMUX(uint8_t SRC = 0){
-    // REFS[1:0] = [01]   - Источником опорного напряжения является питание
-    // ADLAR     = [0]    - Режим 10 бит
-    // x         = [0]    - Резервный бит
-    // MUX[3:0]  = [SRC]  - Источник сигнала
+    //       REFS[1:0]    = [01]  - Источником опорного напряжения является питание
+    //       ||ADLAR      = [0]   - Режим 10 бит
+    //       |||x         = [0]   - Резервный бит
+    //       ||||MUX[3:0] = [SRC] - Источник сигнала
+    //       ||||||||
     ADMUX = B01000000 | (SRC & B00001111);
 }
 
 inline void StartAdc() {
     SetupADCSRB();
-
-    SetupADMUX(aPinIdx.head);
-    uint8_t oldSREG = SREG;
-    sei();                       // Прерывания нужно разрешить
-    SetupADCSRA();               // Старт АЦП
-    // АЦП начал оцифровывать пин curPin
-    SetupADMUX(aPinIdx.CalcHead(1)); // Записываем в буфер номер следующего пина,
-                                     // который АЦП будет оцифровывать во время прерывания
-    SREG = oldSREG;
+    SetupADMUX(aPinList[PinIdx.head]);         // Записываем в буфер текущий пин [n]
+    sei();                                     // Прерывания нужно разрешить
+    SetupADCSRA();                             // АЦП начал оцифровывать пин [n]
+    SetupADMUX(aPinList[aPinIdx.CalcHead(1)]); // Записываем в буфер номер следующего пина [n+1],
+                                               // который АЦП будет оцифровывать во время прерывания
 }
 
 /* **** Interrupt service routine **** */
@@ -162,10 +159,10 @@ ISR(ADC_vect){
     uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
     uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
     aPinCurVal[aPinIdx.head] = (hi << 8) | lo;
-    // curPin указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
+    // aPinIdx.head указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
     // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
-    aPinIdx.head = ADMUX & B00001111;  // В следующем прерывании будет готов результат для пина из ADMUX
-    SetupADMUX(aPinIdx.CalcHead(1));   // Кладем в буфер номер следующего пина
+    aPinIdx.HeadFwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
+    SetupADMUX(aPinList[aPinIdx.CalcHeadFwd(1)]); // Кладем в буфер номер следующего пина
 }
 
 // WAVE SAMPLE
@@ -173,28 +170,28 @@ ISR(ADC_vect){
 #define WAVE_SAMPLE_SZ 500
 volatile uint16_t curWS = 0;
 
-volatile uint8_t wavePin = 0; // Указывает номер пина из pinList, для которого строится сэмпл
-volatile uint32_t tcnt = 0;
-volatile uint32_t prevTcnt = 0;
+// К этим переменым доступ только из прерывания, поэтому volatile не нужен
+static uint16_t aPinClcMax[PINBUF_SZ] = { std::numeric_limits<int16_t>::min() }; // Буфер для вычисления aPinMax
+static uint16_t aPinClcMin[PINBUF_SZ] = { std::numeric_limits<int16_t>::max() }; // Буфер для вычисления aPinMin
 
+// aPinIdx.tail - указывает на пин, с которым работает вычислитель Min/Max
 ISR(TIMER1_COMPA_vect){
     if (curWS < WAVE_SAMPLE_SZ) { // Ищем максимальное/минимальное значения
-        for (size_t pos = 0; pos < PINLST_SZ; pos++) {
-            uint16_t val = aPinVal[pos];
-            if (val > aPinClcMax[pos])
-                aPinClcMax[pos] = val;
-            if (val < aPinClcMin[pos])
-                aPinClcMin[pos] = val;
-        }
+        uint8_t pinIdx = aPinIdx.tail;
+        uint16_t val = aPinVal[pinIdx];
+        if (val > aPinClcMax[pinIdx])
+            aPinClcMax[pinIdx] = val;
+        if (val < aPinClcMin[pinIdx])
+            aPinClcMin[pinIdx] = val;
         curWS++;
     } else {
-        for (size_t pos = 0; pos < PINLST_SZ; pos++) {
-            aPinMax[pos] = aPinClcMax[pos];
-            aPinClcMax[pos] = std::numeric_limits<int16_t>::min();
-            aPinMin[pos] = aPinClcMin[pos];
-            aPinClcMin[pos] = std::numeric_limits<int16_t>::max();
-        }
+        uint8_t pinIdx = aPinIdx.tail;
+        aPinMax[pinIdx] = aPinClcMax[pinIdx];
+        aPinClcMax[pinIdx] = std::numeric_limits<int16_t>::min();
+        aPinMin[pinIdx] = aPinClcMin[pinIdx];
+        aPinClcMin[pinIdx] = std::numeric_limits<int16_t>::max();
         curWS = 0;
+        aPinIdx.TailFwd(1);
     }
 }
 
@@ -481,6 +478,9 @@ void setup() {
     Wire.onRequest(WireOnRequest);
     Wire.onReceive(WireOnReceive);
 }
+
+static uint32_t tcnt = 0;
+static uint32_t prevTcnt = 0;
 
 void loop() {
     Serial.print(tcnt-prevTcnt);

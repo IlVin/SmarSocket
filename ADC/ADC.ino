@@ -8,47 +8,23 @@
 // http://masteringarduino.blogspot.ru/2013/11/USART.html
 
 template <typename T>
-class TFifoIndex {
+class TRingIndex {
     private:
-        T bufSize;
+        T size;
 
     public:
-        T head;
-        T tail;
+        T idx;
 
-        TFifoIndex (size_t bufSize): bufSize(bufSize), head(0), tail(0) { }
+        TRingIndex (T size): size(size), idx(0) { }
+        ~TRingIndex() = default;
 
-        ~TFifoIndex() = default;
-
-        bool IsEmpty() {
-            return head == tail;
+        T CalcFwd (T fwd = 1) {
+            return (idx + fwd) % size;
         }
-
-        bool IsFull() {
-            return head == ((tail + 1) % bufSize);
-        }
-
-        T CalcHeadFwd (T fwd = 1) {
-            return (head + fwd) % bufSize;
-        }
-
-        void HeadFwd (T fwd = 1) {
-            head = CalcHeadFwd(fwd);
-        }
-
-        T CalcTailFwd (size_t fwd = 0) {
-            return (tail + fwd) % bufSize;
-        }
-
-        void TailFwd (T fwd = 1) {
-            head = CalcTailFwd(fwd);
-        }
-
-        T size() {
-            return (head + bufSize - tail) % bufSize;
+        void Fwd (T fwd = 1) {
+            idx = CalcFwd(fwd);
         }
 };
-
 
 #define PINLST_SZ 8                                                                // Размер списка пинов
 struct TAnalogPin {
@@ -73,7 +49,7 @@ struct TAnalogPin {
 
 // Аналоговые пины
 static TAnalogPin aPin[PINLST_SZ] = { A0, A1, A2, A3, A4, A5, A6, A7 };
-volatile TFifoIndex<uint8_t> aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов: aPinIdx.head - ISR ADC; aPinIdx.tail - ISR Timer
+TRingIndex<uint8_t> aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -160,10 +136,10 @@ inline void SetupADMUX(uint8_t SRC = 0){
 
 inline void StartAdc() {
     SetupADCSRB();
-    SetupADMUX(aPin[aPinIdx.head].id);         // Записываем в буфер текущий пин [n]
+    SetupADMUX(aPin[aPinIdx.idx].id);         // Записываем в буфер текущий пин [n]
     sei();                                     // Прерывания нужно разрешить
     SetupADCSRA();                             // АЦП начал оцифровывать пин [n]
-    SetupADMUX(aPin[aPinIdx.CalcHeadFwd(1)].id); // Записываем в буфер номер следующего пина [n+1],
+    SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id); // Записываем в буфер номер следующего пина [n+1],
                                                // который АЦП будет оцифровывать во время прерывания
 }
 
@@ -174,21 +150,22 @@ inline void StartAdc() {
 ISR(ADC_vect){
     uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
     uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
-    aPin[aPinIdx.head].curVal = (hi << 8) | lo;
-    // aPinIdx.head указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
+    aPin[aPinIdx.idx].curVal = (hi << 8) | lo;
+    // aPinIdx.idx указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
     // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
-    aPinIdx.HeadFwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
-    SetupADMUX(aPin[aPinIdx.CalcHeadFwd(1)].id); // Кладем в буфер номер следующего пина
+    aPinIdx.Fwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
+    SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id); // Кладем в буфер номер следующего пина
 }
 
 // WAVE SAMPLE
 #define WAVE_SAMPLE_SZ 500
-volatile uint16_t curWS = 0;
+uint16_t curWS = 0;
 
 // aPinIdx.tail - указывает на пин, с которым работает вычислитель Min/Max
+TRingIndex<uint8_t> aPinIdxTimer(PINLST_SZ);
 ISR(TIMER1_COMPA_vect){
     if (curWS < WAVE_SAMPLE_SZ) { // Ищем максимальное/минимальное значения
-        uint8_t pinIdx = aPinIdx.tail;
+        uint8_t pinIdx = aPinIdxTimer.idx;
         uint16_t val = aPin[pinIdx].curVal;
         if (val > aPin[pinIdx].maxClcVal)
             aPin[pinIdx].maxClcVal = val;
@@ -196,13 +173,13 @@ ISR(TIMER1_COMPA_vect){
             aPin[pinIdx].minClcVal = val;
         curWS++;
     } else {
-        uint8_t pinIdx = aPinIdx.tail;
+        uint8_t pinIdx = aPinIdxTimer.idx;
         aPin[pinIdx].maxVal = aPin[pinIdx].maxClcVal;
         aPin[pinIdx].maxClcVal = 0x0000;
         aPin[pinIdx].minVal = aPin[pinIdx].minClcVal;
         aPin[pinIdx].minClcVal = 0xFFFF;
         curWS = 0;
-        aPinIdx.TailFwd(1);
+        aPinIdxTimer.Fwd(1);
     }
 }
 
@@ -367,48 +344,53 @@ inline void SetupPins() {
 
 #define UART_BUF_SZ 64
 struct TUartBuf {
-    uint8_t data[UART_BUF_SZ];             // Буфер
-    TFifoIndex<uint8_t> idx{UART_BUF_SZ};  // Кольцевой индексатор
+    uint8_t data[UART_BUF_SZ];              // Буфер
+    TRingIndex<uint8_t> head{UART_BUF_SZ};  // Кольцевой индексатор
+    TRingIndex<uint8_t> tail{UART_BUF_SZ};  // Кольцевой индексатор
 
-    bool IsEmpty () {
-        return idx.IsEmpty();
+    bool IsEmpty() {
+        return head.idx == tail.idx;
     }
 
-    bool IsFull () {
-        return idx.IsFull();
+    bool IsFull() {
+        return head.idx == ((tail.idx + 1) % UART_BUF_SZ);
+    }
+
+    uint8_t size() {
+        return (head.idx + UART_BUF_SZ - tail.idx) % UART_BUF_SZ;
     }
 
     bool PutC(const uint8_t& ch) {
-        if (idx.IsFull())
+        if (IsFull())
             return false;
-        data[idx.head] = ch;
-        idx.HeadFwd(1);
+        data[head.idx] = ch;
+        head.Fwd(1);
         return true;
     }
 
     bool GetC(uint8_t& ch) {
-        if (idx.IsEmpty())
+        if (IsEmpty())
             return false;
-        ch = data[idx.tail];
-        idx.TailFwd(1);
+        ch = data[tail.idx];
+        tail.Fwd(1);
         return true;
     }
 
     bool PutPkt(const uint8_t& idType, const uint8_t& idPin, const uint16_t& data ) {
-        uint8_t headOld = idx.head;
+        uint8_t headOld = head.idx;
         if (
             !PutC(idType | idPin | B10000000) ||
             !PutC(static_cast<uint8_t>((data >> 7) & B01111111)) ||
             !PutC(static_cast<uint8_t>(data & B01111111))
         ) {
-            idx.head = headOld;
+            head.idx = headOld;
             return false;
         }
         return true;
     }
 
     bool GetPkt(uint8_t& idType, uint8_t& idPin, uint16_t& data ) {
-        uint8_t tailOld = idx.tail;
+        uint8_t tailOld = tail.idx;
         uint8_t pktId = 0;
 
         START:
@@ -420,14 +402,14 @@ struct TUartBuf {
             uint8_t dataLo = 0;
             if (!GetC(dataHi) || !GetC(dataLo)) {
                 // Данные пакета еще не приехали. Возвращаем хвост на место!
-                idx.tail = tailOld;
+                tail.idx = tailOld;
                 return false;
             }
             // Проверка на то, что байты являются данными пакета
             if ((dataHi & B10000000) || (dataLo & B10000000)) {
                 // Приехали не данные, а команды. Что-то поломалось. Устанавливаем хвост на 1 позицию вперед
-                idx.tail = tailOld;
-                idx.TailFwd(1);
+                tail.idx = tailOld;
+                tail.Fwd(1);
                 // И повторяем снова!
                 goto START;
             }
@@ -459,7 +441,6 @@ int InitUart(void) {
     //          ||||||U2X   -   Двойная скорость
     //          |||||||MPCM -   Многопроцессорный режим
     //          ||||||||
-    //          76543210
     UCSR0A =   B00000000;
     //          RXCIE       -   прерывание при приёме данных
     //          |TXCIE      -   прерывание при завершение передачи
@@ -470,7 +451,6 @@ int InitUart(void) {
     //          ||||||RXB8  -   9 бит принятых данных
     //          |||||||TXB8 -   9 бит переданных данных
     //          ||||||||
-    //          76543210
     UCSR0B =   B00011000;   //  разрешен приём и передача по UART
     //          URSEL       -   всегда 1
     //          |UMSEL      -   режим:1-синхронный 0-асинхронный
@@ -481,7 +461,6 @@ int InitUart(void) {
     //          ||||||UCSZ0 -   UCSZ0:2 размер кадра данных
     //          |||||||UCPOL-   в синхронном режиме - тактирование
     //          ||||||||
-    //          76543210
     UCSR0C =   B10000110;   //  8-битовая посылка
 }
 
@@ -504,7 +483,7 @@ unsigned char GetChUart(void)//    Получение байта
 ISR (USART_UDRE_vect) {
     buffer_index++;
     if (buffer_index==Nbyte) {
-        UCSR0B &=~(1 << UDRIE0);
+        UCSR0B &= ~(1 << UDRIE0);
         ClearBuffUart();
     } else {
         UDR0 = buff_uart[buffer_index];

@@ -1,63 +1,79 @@
 
-#include <Wire.h>
-#include <limits>
-
 // http://codius.ru/articles/Arduino_%D1%83%D1%81%D0%BA%D0%BE%D1%80%D1%8F%D0%B5%D0%BC_%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%83_%D0%BF%D0%BB%D0%B0%D1%82%D1%8B_%D0%A7%D0%B0%D1%81%D1%82%D1%8C_2_%D0%90%D0%BD%D0%B0%D0%BB%D0%BE%D0%B3%D0%BE_%D1%86%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9_%D0%BF%D1%80%D0%B5%D0%BE%D0%B1%D1%80%D0%B0%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C_%D0%90%D0%A6%D0%9F_%D0%B8_analogRead
 // http://www.gaw.ru/html.cgi/txt/doc/micros/avr/arh128/12.htm
 // https://geektimes.ru/post/263024/
 // https://habrahabr.ru/post/321008/
 // https://code.google.com/archive/p/arduino-timerone/downloads
 // http://wiki.openmusiclabs.com/wiki/ArduinoFHT
+// http://masteringarduino.blogspot.ru/2013/11/USART.html
 
 template <typename T>
 class TFifoIndex {
-    T bufSize;
-    T head;
-    T tail;
+    private:
+        T bufSize;
 
     public:
-    TFifo (size_t bufSize): bufSize(bufSize), head(0), tail(0) { }
-    ~TFifo() {};
+        T head;
+        T tail;
 
-    bool IsEmpty() {
-        return head == tail;
-    }
+        TFifoIndex (size_t bufSize): bufSize(bufSize), head(0), tail(0) { }
 
-    bool IsFull() {
-        return head == ((tail + 1) % bufSize);
-    }
+        ~TFifoIndex() = default;
 
-    T CalcHeadFwd (T fwd = 1) {
-        return (head + fwd) % bufSize;
-    }
+        bool IsEmpty() {
+            return head == tail;
+        }
 
-    void HeadFwd (T fwd = 1) {
-        head = CalcHeadFwd(fwd);
-    }
+        bool IsFull() {
+            return head == ((tail + 1) % bufSize);
+        }
 
-    T CalcTailFwd (size_t fwd = 0) {
-        return (tail + fwd) % bufSize;
-    }
+        T CalcHeadFwd (T fwd = 1) {
+            return (head + fwd) % bufSize;
+        }
 
-    void TailFwd (T fwd = 1) {
-        head = CalcTailFwd(fwd);
-    }
+        void HeadFwd (T fwd = 1) {
+            head = CalcHeadFwd(fwd);
+        }
 
-    T size() {
-        return (head + bufSize - tail) % bufSize;
-    }
+        T CalcTailFwd (size_t fwd = 0) {
+            return (tail + fwd) % bufSize;
+        }
+
+        void TailFwd (T fwd = 1) {
+            head = CalcTailFwd(fwd);
+        }
+
+        T size() {
+            return (head + bufSize - tail) % bufSize;
+        }
 };
 
 
-#define PINLST_SZ 8                                                         // Размер списка пинов
-// К этим переменным доступ 
-volatile uint8_t aPinList[PINBUF_SZ] = { A0, A1, A2, A3, A4, A5, A6, A7 }; // Список аналоговых пинов
-volatile uint16_t aPinCurVal[PINBUF_SZ] = { 0 };                           // Мгновенные значения пинов
-volatile static uint16_t aPinMax[PINBUF_SZ] = { 0 };                       // Максимальные значения пинов
-volatile static uint16_t aPinMin[PINBUF_SZ] = { 0 };                       // Минимальные значения пинов
+#define PINLST_SZ 8                                                                // Размер списка пинов
+struct TAnalogPin {
+    // Поля, к которым доступ осуществляется и из loop и из ISR
+    volatile uint8_t  id;      // Номер физического пина
+    volatile uint16_t curVal;  // Мгновенное значение пина
+    volatile uint16_t maxVal;  // Максимальное значение пина за время сэмпла
+    volatile uint16_t minVal;  // Минимальное значение пина за время сэмпла
 
+    // Поля, к которым доступ осуществляется только из ISR
+    uint16_t maxClcVal;        // Временное значение во время вычисления maxVal
+    uint16_t minClcVal;        // Временное значение во время вычисления minVal
 
-volatile TFifoIndex<uint8_t> aPinIdx {PIN_SZ};  // Индексатор аналоговых пинов: aPinIdx.head - ISR ADC; aPinIdx.tail - ISR Timer
+    TAnalogPin (uint8_t id):
+        id(id),
+        curVal(0x0000),
+        maxVal(0x0000),
+        minVal(0x0000),
+        maxClcVal(0x0000),
+        minClcVal(0xFFFF) {}
+};
+
+// Аналоговые пины
+static TAnalogPin aPin[PINLST_SZ] = { A0, A1, A2, A3, A4, A5, A6, A7 };
+volatile TFifoIndex<uint8_t> aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов: aPinIdx.head - ISR ADC; aPinIdx.tail - ISR Timer
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -144,10 +160,10 @@ inline void SetupADMUX(uint8_t SRC = 0){
 
 inline void StartAdc() {
     SetupADCSRB();
-    SetupADMUX(aPinList[PinIdx.head]);         // Записываем в буфер текущий пин [n]
+    SetupADMUX(aPin[aPinIdx.head].id);         // Записываем в буфер текущий пин [n]
     sei();                                     // Прерывания нужно разрешить
     SetupADCSRA();                             // АЦП начал оцифровывать пин [n]
-    SetupADMUX(aPinList[aPinIdx.CalcHead(1)]); // Записываем в буфер номер следующего пина [n+1],
+    SetupADMUX(aPin[aPinIdx.CalcHeadFwd(1)].id); // Записываем в буфер номер следующего пина [n+1],
                                                // который АЦП будет оцифровывать во время прерывания
 }
 
@@ -158,38 +174,33 @@ inline void StartAdc() {
 ISR(ADC_vect){
     uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
     uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
-    aPinCurVal[aPinIdx.head] = (hi << 8) | lo;
+    aPin[aPinIdx.head].curVal = (hi << 8) | lo;
     // aPinIdx.head указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
     // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
     aPinIdx.HeadFwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
-    SetupADMUX(aPinList[aPinIdx.CalcHeadFwd(1)]); // Кладем в буфер номер следующего пина
+    SetupADMUX(aPin[aPinIdx.CalcHeadFwd(1)].id); // Кладем в буфер номер следующего пина
 }
 
 // WAVE SAMPLE
-#define V0 0x0200
 #define WAVE_SAMPLE_SZ 500
 volatile uint16_t curWS = 0;
-
-// К этим переменым доступ только из прерывания, поэтому volatile не нужен
-static uint16_t aPinClcMax[PINBUF_SZ] = { std::numeric_limits<int16_t>::min() }; // Буфер для вычисления aPinMax
-static uint16_t aPinClcMin[PINBUF_SZ] = { std::numeric_limits<int16_t>::max() }; // Буфер для вычисления aPinMin
 
 // aPinIdx.tail - указывает на пин, с которым работает вычислитель Min/Max
 ISR(TIMER1_COMPA_vect){
     if (curWS < WAVE_SAMPLE_SZ) { // Ищем максимальное/минимальное значения
         uint8_t pinIdx = aPinIdx.tail;
-        uint16_t val = aPinVal[pinIdx];
-        if (val > aPinClcMax[pinIdx])
-            aPinClcMax[pinIdx] = val;
-        if (val < aPinClcMin[pinIdx])
-            aPinClcMin[pinIdx] = val;
+        uint16_t val = aPin[pinIdx].curVal;
+        if (val > aPin[pinIdx].maxClcVal)
+            aPin[pinIdx].maxClcVal = val;
+        if (val < aPin[pinIdx].minClcVal)
+            aPin[pinIdx].minClcVal = val;
         curWS++;
     } else {
         uint8_t pinIdx = aPinIdx.tail;
-        aPinMax[pinIdx] = aPinClcMax[pinIdx];
-        aPinClcMax[pinIdx] = std::numeric_limits<int16_t>::min();
-        aPinMin[pinIdx] = aPinClcMin[pinIdx];
-        aPinClcMin[pinIdx] = std::numeric_limits<int16_t>::max();
+        aPin[pinIdx].maxVal = aPin[pinIdx].maxClcVal;
+        aPin[pinIdx].maxClcVal = 0x0000;
+        aPin[pinIdx].minVal = aPin[pinIdx].minClcVal;
+        aPin[pinIdx].minClcVal = 0xFFFF;
         curWS = 0;
         aPinIdx.TailFwd(1);
     }
@@ -300,8 +311,8 @@ inline void StopTimer1() {
 
 // Установка режима пинов
 inline void SetupPins() {
-    for (int8_t i = 0; i < pinListSize; ++i) {
-        pinMode(pinList[i], INPUT);
+    for (int8_t pinIdx = PINLST_SZ; --pinIdx;) {
+        pinMode(aPin[pinIdx].id, INPUT);
     };
 }
 
@@ -354,15 +365,91 @@ inline void SetupPins() {
 // 0x[CDEF]* - Зарезервировано
 //        Значениями цифровых пинов могут быть - 0 или 1. Все, что не 0, то является 1.
 
-#define UART_BUF_SZ 16
-volatile uint8_t uartBuf[UART_BUF_SZ];
-volatile uint8_t uartHead = 0;
-volatile uint8_t uartTail = 0;
+#define UART_BUF_SZ 64
+struct TUartBuf {
+    uint8_t data[UART_BUF_SZ];             // Буфер
+    TFifoIndex<uint8_t> idx{UART_BUF_SZ};  // Кольцевой индексатор
+
+    bool IsEmpty () {
+        return idx.IsEmpty();
+    }
+
+    bool IsFull () {
+        return idx.IsFull();
+    }
+
+    bool PutC(const uint8_t& ch) {
+        if (idx.IsFull())
+            return false;
+        data[idx.head] = ch;
+        idx.HeadFwd(1);
+        return true;
+    }
+
+    bool GetC(uint8_t& ch) {
+        if (idx.IsEmpty())
+            return false;
+        ch = data[idx.tail];
+        idx.TailFwd(1);
+        return true;
+    }
+
+    bool PutPkt(const uint8_t& idType, const uint8_t& idPin, const uint16_t& data ) {
+        uint8_t headOld = idx.head;
+        if (
+            !PutC(idType | idPin | B10000000) ||
+            !PutC(static_cast<uint8_t>((data >> 7) & B01111111)) ||
+            !PutC(static_cast<uint8_t>(data & B01111111))
+        ) {
+            idx.head = headOld;
+            return false;
+        }
+        return true;
+    }
+
+    bool GetPkt(uint8_t& idType, uint8_t& idPin, uint16_t& data ) {
+        uint8_t tailOld = idx.tail;
+        uint8_t pktId = 0;
+
+        START:
+        // Ищем pktId байт пакета
+        while (GetC(pktId) && !(pktId & B10000000)) { } // Считываем байты подряд, пока не встретим id байт
+
+        if (pktId & B10000000) {
+            uint8_t dataHi = 0;
+            uint8_t dataLo = 0;
+            if (!GetC(dataHi) || !GetC(dataLo)) {
+                // Данные пакета еще не приехали. Возвращаем хвост на место!
+                idx.tail = tailOld;
+                return false;
+            }
+            // Проверка на то, что байты являются данными пакета
+            if ((dataHi & B10000000) || (dataLo & B10000000)) {
+                // Приехали не данные, а команды. Что-то поломалось. Устанавливаем хвост на 1 позицию вперед
+                idx.tail = tailOld;
+                idx.TailFwd(1);
+                // И повторяем снова!
+                goto START;
+            }
+            idType = pktId & 0xF0;
+            idPin = pktId & 0x0F;
+            data = (static_cast<uint16_t>(dataHi) << 7) | static_cast<uint16_t>(dataLo);
+            return true;
+        }
+
+        // pktId так и не нашли - возвращать хвост не имеет смысла
+        return false;
+    }
+};
+
+volatile TUartBuf uartRxBuf; // Буфер приема
+volatile TUartBuf uartTxBuf; // Буфер передачи
+
 
 int InitUart(void) {
     //  Установка скорости 9600
-    UBRRH=0;    //  UBRR=f/(16*band)-1 f=8000000Гц band=9600,
-    UBRRL=51;   //  нормальный асинхронный двунаправленный режим работы
+    UBRR0H = 0;    //  UBRR=f/(16*band)-1 f=8000000Гц band=9600,
+    UBRR0L = 51;   //  нормальный асинхронный двунаправленный режим работы
     //          RXC         -   завершение приёма
     //          |TXC        -   завершение передачи
     //          ||UDRE      -   отсутствие данных для отправки
@@ -373,7 +460,7 @@ int InitUart(void) {
     //          |||||||MPCM -   Многопроцессорный режим
     //          ||||||||
     //          76543210
-    UCSRA =   0b00000000;
+    UCSR0A =   B00000000;
     //          RXCIE       -   прерывание при приёме данных
     //          |TXCIE      -   прерывание при завершение передачи
     //          ||UDRIE     -   прерывание отсутствие данных для отправки
@@ -384,7 +471,7 @@ int InitUart(void) {
     //          |||||||TXB8 -   9 бит переданных данных
     //          ||||||||
     //          76543210
-    UCSRB =   0b00011000;   //  разрешен приём и передача по UART
+    UCSR0B =   B00011000;   //  разрешен приём и передача по UART
     //          URSEL       -   всегда 1
     //          |UMSEL      -   режим:1-синхронный 0-асинхронный
     //          ||UPM1      -   UPM0:1 чётность
@@ -395,29 +482,29 @@ int InitUart(void) {
     //          |||||||UCPOL-   в синхронном режиме - тактирование
     //          ||||||||
     //          76543210
-    UCSRC =   0b10000110;   //  8-битовая посылка
+    UCSR0C =   B10000110;   //  8-битовая посылка
 }
 
 void SendUart(unsigned char c) {
     //  Устанавливается, когда регистр свободен)
-    if ( uartTail != uartHead && (UCSRA & (1 << UDRE)) != 0 ) {
-        UDR = uartBuf[uartTail];
+    if ( uartTail != uartHead && (UCSR0A & (1 << UDRE0)) != 0 ) {
+        UDR0 = uartBuf[uartTail];
         uartTail = (uartTail + 1) % UART_BUF_SZ;
     }
 }
 
 unsigned char GetChUart(void)//    Получение байта
 {
-    while(!(UCSRA&(1< <RXC))) //  Устанавливается, когда регистр свободен
+    while(!(UCSR0A & (1 << RXC0))) //  Устанавливается, когда регистр свободен
         {}
-        return UDR;
+        return UDR0;
 }
 
 //Прерывание отправки данных
 ISR (USART_UDRE_vect) {
     buffer_index++;
     if (buffer_index==Nbyte) {
-        UCSR0B &=~(1<<UDRIE0);
+        UCSR0B &=~(1 << UDRIE0);
         ClearBuffUart();
     } else {
         UDR0 = buff_uart[buffer_index];
@@ -426,7 +513,7 @@ ISR (USART_UDRE_vect) {
 
 //Прием данных
 char USART_Receive( void ) {
-    while ( !(UCSR0A & (1<<RXC0)) );
+    while ( !(UCSR0A & (1 << RXC0)) );
     return UDR0;
 }
 
@@ -442,28 +529,6 @@ ISR(USART_RX_vect) {
     if (Nbyte == BUFFER_UART_SIZE) {
         USART_Transmit();
     }
-}
-
-
-
-
-
-void WireOnRequest() {
-    for (byte Id = 0x00; Id < 0x03; ++Id) {
-        Wire.write(Id);
-        Wire.write('H');
-        Wire.write('i');
-    }
-}
-
-void WireOnReceive() {
-    Serial.print("Wire OnReceive: ");
-    while (0 < Wire.available()) { // loop through all but the last
-        uint8_t c = Wire.read(); // receive byte as a character
-        Serial.print(c);         // print the byte
-        Serial.print(", ");
-    }
-    Serial.println("");
 }
 
 /* *************************************** */
@@ -486,7 +551,7 @@ void loop() {
     Serial.print(tcnt-prevTcnt);
     prevTcnt = tcnt;
     Serial.print(",  ");
-    Serial.print(OCR1A);
+    Serial.print(OCR0A);
     Serial.print(": ");
     for (int i = 0; i < 33; i++) {
         Serial.print(waveSample[i]);

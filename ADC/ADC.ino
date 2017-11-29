@@ -137,10 +137,10 @@ inline void SetupADMUX(uint8_t SRC = 0){
 
 inline void StartAdc() {
     SetupADCSRB();
-    SetupADMUX(aPin[aPinIdx.idx].id);         // Записываем в буфер текущий пин [n]
+    SetupADMUX(aPin[aPinIdx.idx].id);          // Записываем в буфер текущий пин [n]
     sei();                                     // Прерывания нужно разрешить
     SetupADCSRA();                             // АЦП начал оцифровывать пин [n]
-    SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id); // Записываем в буфер номер следующего пина [n+1],
+    SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id);   // Записываем в буфер номер следующего пина [n+1],
                                                // который АЦП будет оцифровывать во время прерывания
 }
 
@@ -466,48 +466,81 @@ int InitUart(void) {
 }
 
 void SendUart(unsigned char c) {
-    //  Устанавливается, когда регистр свободен)
-    if ( uartTail != uartHead && (UCSR0A & (1 << UDRE0)) != 0 ) {
-        UDR0 = uartBuf[uartTail];
-        uartTail = (uartTail + 1) % UART_BUF_SZ;
+    if ( (UCSR0A & B00100000) != 0 ) { // Если UART готов к передаче данных
+        if (!uartTxBuf.GetCh(UDR0)) {   // Если для передачи данных не оказалось
+        }
     }
 }
 
-unsigned char GetChUart(void)//    Получение байта
-{
-    while(!(UCSR0A & (1 << RXC0))) //  Устанавливается, когда регистр свободен
-        {}
-        return UDR0;
+inline void StartRxIsr() {
+    //          RXCIE       -   прерывание при приёме данных
+    //          |TXCIE      -   прерывание при завершение передачи
+    //          ||UDRIE     -   прерывание отсутствие данных для отправки
+    //          |||RXEN     -   разрешение приёма
+    //          ||||TXEN    -   разрешение передачи
+    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
+    //          ||||||RXB8  -   9 бит принятых данных
+    //          |||||||TXB8 -   9 бит переданных данных
+    //          ||||||||
+    UCSR0B =   B00011000;   //  разрешен приём и передача по UART
 }
 
-//Прерывание отправки данных
-ISR (USART_UDRE_vect) {
-    buffer_index++;
-    if (buffer_index==Nbyte) {
-        UCSR0B &= ~(1 << UDRIE0);
-        ClearBuffUart();
-    } else {
-        UDR0 = buff_uart[buffer_index];
-    }
+inline void StopRxIsr() {
+    //          RXCIE       -   прерывание при приёме данных
+    //          |TXCIE      -   прерывание при завершение передачи
+    //          ||UDRIE     -   прерывание отсутствие данных для отправки
+    //          |||RXEN     -   разрешение приёма
+    //          ||||TXEN    -   разрешение передачи
+    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
+    //          ||||||RXB8  -   9 бит принятых данных
+    //          |||||||TXB8 -   9 бит переданных данных
+    //          ||||||||
+    UCSR0B &=  B01111111;   //  Сброс бита Rx прерывания
+}
+
+inline void StartUdreIsr() {
+    //          RXCIE       -   прерывание при приёме данных
+    //          |TXCIE      -   прерывание при завершение передачи
+    //          ||UDRIE     -   прерывание отсутствие данных для отправки
+    //          |||RXEN     -   разрешение приёма
+    //          ||||TXEN    -   разрешение передачи
+    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
+    //          ||||||RXB8  -   9 бит принятых данных
+    //          |||||||TXB8 -   9 бит переданных данных
+    //          ||||||||
+    UCSR0B |=  B10000000;   //  Установка бита Rx прерывания
+}
+
+inline void StopUdreIsr() {
+    //          RXCIE       -   прерывание при приёме данных
+    //          |TXCIE      -   прерывание при завершение передачи
+    //          ||UDRIE     -   прерывание отсутствие данных для отправки
+    //          |||RXEN     -   разрешение приёма
+    //          ||||TXEN    -   разрешение передачи
+    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
+    //          ||||||RXB8  -   9 бит принятых данных
+    //          |||||||TXB8 -   9 бит переданных данных
+    //          ||||||||
+    UCSR0B =   B00011000;   //  разрешен приём и передача по UART
 }
 
 //Прием данных
 char USART_Receive( void ) {
-    while ( !(UCSR0A & (1 << RXC0)) );
+    while ( !(UCSR0A & B10000000) );
     return UDR0;
+}
+
+//Прерывание отправки данных
+ISR (USART_UDRE_vect) {
+    if (!uartTxBuf.GetC(UDR0)) {
+        StopUdreIsr(); // Если в буфере нет данных останавливаем прерывание
+    }
 }
 
 //Прерывание по приему данных
 ISR(USART_RX_vect) {
-    unsigned char b;
-    b = UDR0;
-    buff_uart[Nbyte] = b;
-    Nbyte++;
-    if (b == (uint8_t)0xFF) {
-        USART_Transmit();
-    }
-    if (Nbyte == BUFFER_UART_SIZE) {
-        USART_Transmit();
+    if (!uartRxBuf.PutC(UDR0)) {
+        StopRxIsr(); // Если в буфере нет места новым данным, останавливаем прерывание
     }
 }
 

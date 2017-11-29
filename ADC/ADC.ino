@@ -1,5 +1,6 @@
 
 #include <limits.h>
+#include "Arduino.h"
 
 // http://www.atmel.com/images/Atmel-8271-8-bit-AVR-Microcontroller-ATmega48A-48PA-88A-88PA-168A-168PA-328-328P_datasheet_Complete.pdf
 // http://codius.ru/articles/Arduino_%D1%83%D1%81%D0%BA%D0%BE%D1%80%D1%8F%D0%B5%D0%BC_%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%83_%D0%BF%D0%BB%D0%B0%D1%82%D1%8B_%D0%A7%D0%B0%D1%81%D1%82%D1%8C_2_%D0%90%D0%BD%D0%B0%D0%BB%D0%BE%D0%B3%D0%BE_%D1%86%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9_%D0%BF%D1%80%D0%B5%D0%BE%D0%B1%D1%80%D0%B0%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C_%D0%90%D0%A6%D0%9F_%D0%B8_analogRead
@@ -357,7 +358,7 @@ struct TUartBuf {
     }
 
     bool IsFull() {
-        return head.idx == ((tail.idx + 1) % UART_BUF_SZ);
+        return head.CalcFwd(1) == tail.idx;
     }
 
     uint8_t size() {
@@ -428,11 +429,12 @@ struct TUartBuf {
     }
 };
 
-TUartBuf uartRxBuf; // Буфер приема
-TUartBuf uartTxBuf; // Буфер передачи
+volatile TUartBuf uartRxBuf; // Буфер приема
+volatile TUartBuf uartTxBuf; // Буфер передачи
 
 inline void PrepareTxData() {
-    uartTxBuf.PutPkt(0x80, 0x05, (static_cast<uint16_t>('O') << 8) | static_cast<uint8_t>('k')); // Тестовый пакет постит строку '…Ok'
+//    uartTxBuf.PutPkt(0x80, 0x05, (static_cast<uint16_t>('O') << 8) | static_cast<uint16_t>('k')); // Тестовый пакет постит строку '…Ok'
+    uartTxBuf.PutC('@');
 }
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -452,13 +454,6 @@ inline void PrepareTxData() {
 //    if the baud rate is changed. Writing UBRRnL will trigger an immediate update
 //    of the baud rate prescaler.
 
-inline void SetupUbrr() {
-    //  UBRR=f/(2*BAUD)-1  f=16000000Гц BAUD=38400,
-    //  UBRR = 16000000/(2 * 38400) - 1 = 207
-    UBRR0H = 0;
-    UBRR0L = 207;   // Нормальный асинхронный двунаправленный режим работы
-}
-
 inline void SetupUcsrA() {
     //          RXC         -   завершение приёма
     //          |TXC        -   завершение передачи
@@ -473,21 +468,21 @@ inline void SetupUcsrA() {
 }
 
 inline void SetupUcsrB() {
-    //          RXCnE       -   прерывание при приёме данных
-    //          |TXCnE      -   прерывание при завершение передачи
-    //          ||UDRnE     -   прерывание отсутствие данных для отправки
+    //          RXCIE       -   прерывание при приёме данных
+    //          |TXCIE      -   прерывание при завершение передачи
+    //          ||UDRIE     -   прерывание отсутствие данных для отправки
     //          |||RXEN     -   разрешение приёма
     //          ||||TXEN    -   разрешение передачи
     //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
     //          ||||||RXB8  -   9 бит принятых данных
     //          |||||||TXB8 -   9 бит переданных данных
     //          ||||||||
-    UCSR0B &=  B10111000;   //  разрешен приём и передача по UART
+    UCSR0B  =  B10111000;   //  разрешен приём и передача по UART
 }
 
 inline void SetupUcsrC() {
-    //          URSEL       -   всегда 1
-    //          |UMSEL      -   режим:1-синхронный 0-асинхронный
+    //          URSEL       -   режим: 0-асинхронный
+    //          |UMSEL      -   режим: 0-асинхронный
     //          ||UPM1      -   UPM0:1 чётность
     //          |||UPM0     -   UPM0:1 чётность
     //          ||||USBS    -   Стоп биты: 0-1, 1-2
@@ -495,12 +490,18 @@ inline void SetupUcsrC() {
     //          ||||||UCSZ0 -   UCSZ0:2 размер кадра данных
     //          |||||||UCPOL-   в синхронном режиме - тактирование
     //          ||||||||
-    UCSR0C =   B10000110;   //  8-битовая посылка
+    UCSR0C =   B00000110;   //  8-битовая посылка
 }
 
-int InitUsart() {
-    SetupUbrr();      // Установка скорости соединения
+inline void SetupUbrr(uint16_t baud) {
+    uint16_t baud_setting = (F_CPU / 8 / baud  - 1) / 2;
+    UBRR0H = baud_setting >> 8;
+    UBRR0L = baud_setting;
+}
+
+int InitUsart(uint16_t baud) {
     SetupUcsrA();     // установка UCSRA регистра
+    SetupUbrr(baud);  // Установка скорости соединения
     SetupUcsrC();     // установка UCSRC регистра
     SetupUcsrB();     // установка UCSRB регистра - автоматический старт
 }
@@ -514,29 +515,33 @@ ISR (USART_UDRE_vect) {
     UDR0 = data;
 }
 
-//Прерывание по приему данных
+////Прерывание по приему данных
 ISR(USART_RX_vect) {
-    if ((UCSR0A & B00010100) == 0) { // Если не произошла ошибка кадра или чётности, то байт не принмаем
-        uint8_t data = UDR0;
-        while (!uartRxBuf.PutC(data)) {
-            // Если в буфере нет места новым данным, освобождаем место, выкидывая первый пакет,
-            // чтобы не нарушать формат пакетов
-            uint8_t idType;
-            uint8_t idPin;
-            uint16_t data;
-            uartRxBuf.GetPkt(idType, idPin, data);
-        }
-    }
+    uint8_t data = UDR0;
+////    while (!uartRxBuf.PutC(data)) {
+////        // Если в буфере нет места новым данным, освобождаем место, выкидывая первый пакет,
+////        // чтобы не нарушать формат пакетов
+////        uint8_t idType;
+////        uint8_t idPin;
+////        uint16_t data;
+////        uartRxBuf.GetPkt(idType, idPin, data);
+////    }
 }
 /* *************************************** */
 
 void setup() {
+    pinMode(13, OUTPUT);
     SetupPins();
     StartAdc();
     StartTimer1();
-    delay(1000);
-    InitUsart();
+    InitUsart(19200);
 }
 
 void loop() {
+    digitalWrite(13, HIGH);   // turn the LED on (HIGH is the voltage level)
+    delay(1000);              // wait for a second
+    //PrepareTxData();
+    UDR0 = '\n';
+    digitalWrite(13, LOW);    // turn the LED off by making the voltage LOW
+    delay(1000);
 }

@@ -1,4 +1,6 @@
 
+#include <limits.h>
+
 // http://www.atmel.com/images/Atmel-8271-8-bit-AVR-Microcontroller-ATmega48A-48PA-88A-88PA-168A-168PA-328-328P_datasheet_Complete.pdf
 // http://codius.ru/articles/Arduino_%D1%83%D1%81%D0%BA%D0%BE%D1%80%D1%8F%D0%B5%D0%BC_%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%83_%D0%BF%D0%BB%D0%B0%D1%82%D1%8B_%D0%A7%D0%B0%D1%81%D1%82%D1%8C_2_%D0%90%D0%BD%D0%B0%D0%BB%D0%BE%D0%B3%D0%BE_%D1%86%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9_%D0%BF%D1%80%D0%B5%D0%BE%D0%B1%D1%80%D0%B0%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C_%D0%90%D0%A6%D0%9F_%D0%B8_analogRead
 // http://www.gaw.ru/html.cgi/txt/doc/micros/avr/arh128/12.htm
@@ -8,21 +10,23 @@
 // http://wiki.openmusiclabs.com/wiki/ArduinoFHT
 // http://masteringarduino.blogspot.ru/2013/11/USART.html
 
-template <typename T>
 class TRingIndex {
     private:
-        T size;
-
+        uint8_t sz;
     public:
-        T idx;
+        uint8_t idx;
 
-        TRingIndex (T size): size(size), idx(0) { }
+        TRingIndex (uint8_t size): sz(size), idx(0) { }
+
         ~TRingIndex() = default;
 
-        T CalcFwd (T fwd = 1) {
-            return (idx + fwd) % size;
+        uint8_t size() {
+            return sz;
         }
-        void Fwd (T fwd = 1) {
+        uint8_t CalcFwd (uint8_t fwd = 1) {
+            return (idx + (fwd % sz)) % sz;
+        }
+        void Fwd (uint8_t fwd = 1) {
             idx = CalcFwd(fwd);
         }
 };
@@ -50,7 +54,7 @@ struct TAnalogPin {
 
 // Аналоговые пины
 static TAnalogPin aPin[PINLST_SZ] = { A0, A1, A2, A3, A4, A5, A6, A7 };
-TRingIndex<uint8_t> aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
+TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -163,7 +167,7 @@ ISR(ADC_vect){
 uint16_t curWS = 0;
 
 // aPinIdx.tail - указывает на пин, с которым работает вычислитель Min/Max
-TRingIndex<uint8_t> aPinIdxTimer(PINLST_SZ);
+TRingIndex aPinIdxTimer(PINLST_SZ);
 ISR(TIMER1_COMPA_vect){
     if (curWS < WAVE_SAMPLE_SZ) { // Ищем максимальное/минимальное значения
         uint8_t pinIdx = aPinIdxTimer.idx;
@@ -286,14 +290,12 @@ inline void StopTimer1() {
     TCCR1B = 0;
 }
 
-
 // Установка режима пинов
 inline void SetupPins() {
     for (int8_t pinIdx = PINLST_SZ; --pinIdx;) {
         pinMode(aPin[pinIdx].id, INPUT);
     };
 }
-
 
 /* ******************************
  *        UART Interface        *
@@ -317,6 +319,7 @@ inline void SetupPins() {
 // [Id      ][Data1   ] .. [DataK   ]
 // [1*******][0*******] .. [0*******]
 // * - любой бит
+// Идея заимствована из стандарта  кодирования UTF-8.
 
 // ---== ПЕРЕДАЧА ТЕЛЕМЕТРИИ от SLAVE к MASTER ==---
 // Для передачи показаний АЦП используются пакеты вида [Id][DataHi][DataLo]
@@ -345,9 +348,9 @@ inline void SetupPins() {
 
 #define UART_BUF_SZ 64
 struct TUartBuf {
-    uint8_t data[UART_BUF_SZ];              // Буфер
-    TRingIndex<uint8_t> head{UART_BUF_SZ};  // Кольцевой индексатор
-    TRingIndex<uint8_t> tail{UART_BUF_SZ};  // Кольцевой индексатор
+    uint8_t data[UART_BUF_SZ];     // Буфер
+    TRingIndex head{UART_BUF_SZ};  // Кольцевой индексатор
+    TRingIndex tail{UART_BUF_SZ};  // Кольцевой индексатор
 
     bool IsEmpty() {
         return head.idx == tail.idx;
@@ -425,14 +428,38 @@ struct TUartBuf {
     }
 };
 
-volatile TUartBuf uartRxBuf; // Буфер приема
-volatile TUartBuf uartTxBuf; // Буфер передачи
+TUartBuf uartRxBuf; // Буфер приема
+TUartBuf uartTxBuf; // Буфер передачи
 
+inline void PrepareTxData() {
+    uartTxBuf.PutPkt(0x80, 0x05, (static_cast<uint16_t>('O') << 8) | static_cast<uint8_t>('k')); // Тестовый пакет постит строку '…Ok'
+}
 
-int InitUart(void) {
-    //  Установка скорости 9600
-    UBRR0H = 0;    //  UBRR=f/(16*band)-1 f=8000000Гц band=9600,
-    UBRR0L = 51;   //  нормальный асинхронный двунаправленный режим работы
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | Регистры | Биты                                                          |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// |          |   7   |   6   |   5   |   4   |   3   |   2   |   1   |   0   |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | UBRRnH   |   x   |   x   |   x   |   x   |          UBRRn[11:8]          |
+// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
+// | UBRRnL   |                          UBRRn[7:0]                           |
+// +----------+---------------+-------+-------+-------+-------+-------+-------+
+// UBRR[11:0] - USART Baud Rate Register
+//    This is a 12-bit register which contains the USART baud rate.
+//    The UBRRnH contains the four most significant bits,
+//    and the UBRRnL contains the eight least significant bits of the USART baud rate.
+//    Ongoing transmissions by the Transmitter and Receiver will be corrupted
+//    if the baud rate is changed. Writing UBRRnL will trigger an immediate update
+//    of the baud rate prescaler.
+
+inline void SetupUbrr() {
+    //  UBRR=f/(2*BAUD)-1  f=16000000Гц BAUD=38400,
+    //  UBRR = 16000000/(2 * 38400) - 1 = 207
+    UBRR0H = 0;
+    UBRR0L = 207;   // Нормальный асинхронный двунаправленный режим работы
+}
+
+inline void SetupUcsrA() {
     //          RXC         -   завершение приёма
     //          |TXC        -   завершение передачи
     //          ||UDRE      -   отсутствие данных для отправки
@@ -443,21 +470,27 @@ int InitUart(void) {
     //          |||||||MPCM -   Многопроцессорный режим
     //          ||||||||
     UCSR0A =   B00000000;
-    //          RXCIE       -   прерывание при приёме данных
-    //          |TXCIE      -   прерывание при завершение передачи
-    //          ||UDRIE     -   прерывание отсутствие данных для отправки
+}
+
+inline void SetupUcsrB() {
+    //          RXCnE       -   прерывание при приёме данных
+    //          |TXCnE      -   прерывание при завершение передачи
+    //          ||UDRnE     -   прерывание отсутствие данных для отправки
     //          |||RXEN     -   разрешение приёма
     //          ||||TXEN    -   разрешение передачи
     //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
     //          ||||||RXB8  -   9 бит принятых данных
     //          |||||||TXB8 -   9 бит переданных данных
     //          ||||||||
-    UCSR0B =   B00011000;   //  разрешен приём и передача по UART
+    UCSR0B &=  B10111000;   //  разрешен приём и передача по UART
+}
+
+inline void SetupUcsrC() {
     //          URSEL       -   всегда 1
     //          |UMSEL      -   режим:1-синхронный 0-асинхронный
     //          ||UPM1      -   UPM0:1 чётность
     //          |||UPM0     -   UPM0:1 чётность
-    //          ||||USBS    -   топ биты: 0-1, 1-2
+    //          ||||USBS    -   Стоп биты: 0-1, 1-2
     //          |||||UCSZ1  -   UCSZ0:2 размер кадра данных
     //          ||||||UCSZ0 -   UCSZ0:2 размер кадра данных
     //          |||||||UCPOL-   в синхронном режиме - тактирование
@@ -465,111 +498,45 @@ int InitUart(void) {
     UCSR0C =   B10000110;   //  8-битовая посылка
 }
 
-void SendUart(unsigned char c) {
-    if ( (UCSR0A & B00100000) != 0 ) { // Если UART готов к передаче данных
-        if (!uartTxBuf.GetCh(UDR0)) {   // Если для передачи данных не оказалось
-        }
-    }
+int InitUsart() {
+    SetupUbrr();      // Установка скорости соединения
+    SetupUcsrA();     // установка UCSRA регистра
+    SetupUcsrC();     // установка UCSRC регистра
+    SetupUcsrB();     // установка UCSRB регистра - автоматический старт
 }
 
-inline void StartRxIsr() {
-    //          RXCIE       -   прерывание при приёме данных
-    //          |TXCIE      -   прерывание при завершение передачи
-    //          ||UDRIE     -   прерывание отсутствие данных для отправки
-    //          |||RXEN     -   разрешение приёма
-    //          ||||TXEN    -   разрешение передачи
-    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
-    //          ||||||RXB8  -   9 бит принятых данных
-    //          |||||||TXB8 -   9 бит переданных данных
-    //          ||||||||
-    UCSR0B =   B00011000;   //  разрешен приём и передача по UART
-}
-
-inline void StopRxIsr() {
-    //          RXCIE       -   прерывание при приёме данных
-    //          |TXCIE      -   прерывание при завершение передачи
-    //          ||UDRIE     -   прерывание отсутствие данных для отправки
-    //          |||RXEN     -   разрешение приёма
-    //          ||||TXEN    -   разрешение передачи
-    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
-    //          ||||||RXB8  -   9 бит принятых данных
-    //          |||||||TXB8 -   9 бит переданных данных
-    //          ||||||||
-    UCSR0B &=  B01111111;   //  Сброс бита Rx прерывания
-}
-
-inline void StartUdreIsr() {
-    //          RXCIE       -   прерывание при приёме данных
-    //          |TXCIE      -   прерывание при завершение передачи
-    //          ||UDRIE     -   прерывание отсутствие данных для отправки
-    //          |||RXEN     -   разрешение приёма
-    //          ||||TXEN    -   разрешение передачи
-    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
-    //          ||||||RXB8  -   9 бит принятых данных
-    //          |||||||TXB8 -   9 бит переданных данных
-    //          ||||||||
-    UCSR0B |=  B10000000;   //  Установка бита Rx прерывания
-}
-
-inline void StopUdreIsr() {
-    //          RXCIE       -   прерывание при приёме данных
-    //          |TXCIE      -   прерывание при завершение передачи
-    //          ||UDRIE     -   прерывание отсутствие данных для отправки
-    //          |||RXEN     -   разрешение приёма
-    //          ||||TXEN    -   разрешение передачи
-    //          |||||UCSZ2  -   UCSZ0:2 размер кадра данных
-    //          ||||||RXB8  -   9 бит принятых данных
-    //          |||||||TXB8 -   9 бит переданных данных
-    //          ||||||||
-    UCSR0B =   B00011000;   //  разрешен приём и передача по UART
-}
-
-//Прием данных
-char USART_Receive( void ) {
-    while ( !(UCSR0A & B10000000) );
-    return UDR0;
-}
-
-//Прерывание отправки данных
+//Прерывание по отправке данных
 ISR (USART_UDRE_vect) {
-    if (!uartTxBuf.GetC(UDR0)) {
-        StopUdreIsr(); // Если в буфере нет данных останавливаем прерывание
+    uint8_t data;
+    while (!uartTxBuf.GetC(data)) {
+        PrepareTxData(); // Если в буфере нет данных, добавим их туда
     }
+    UDR0 = data;
 }
 
 //Прерывание по приему данных
 ISR(USART_RX_vect) {
-    if (!uartRxBuf.PutC(UDR0)) {
-        StopRxIsr(); // Если в буфере нет места новым данным, останавливаем прерывание
+    if ((UCSR0A & B00010100) == 0) { // Если не произошла ошибка кадра или чётности, то байт не принмаем
+        uint8_t data = UDR0;
+        while (!uartRxBuf.PutC(data)) {
+            // Если в буфере нет места новым данным, освобождаем место, выкидывая первый пакет,
+            // чтобы не нарушать формат пакетов
+            uint8_t idType;
+            uint8_t idPin;
+            uint16_t data;
+            uartRxBuf.GetPkt(idType, idPin, data);
+        }
     }
 }
-
 /* *************************************** */
 
-
 void setup() {
-    Serial.begin(9600);
     SetupPins();
     StartAdc();
     StartTimer1();
-    Wire.begin(0x0A);
-    Wire.onRequest(WireOnRequest);
-    Wire.onReceive(WireOnReceive);
+    delay(1000);
+    InitUsart();
 }
 
-static uint32_t tcnt = 0;
-static uint32_t prevTcnt = 0;
-
 void loop() {
-    Serial.print(tcnt-prevTcnt);
-    prevTcnt = tcnt;
-    Serial.print(",  ");
-    Serial.print(OCR0A);
-    Serial.print(": ");
-    for (int i = 0; i < 33; i++) {
-        Serial.print(waveSample[i]);
-        Serial.print("; ");
-    }
-    Serial.println("");
-    delay(1000);
 }

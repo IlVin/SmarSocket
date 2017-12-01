@@ -1,4 +1,7 @@
 
+#include "RingIndex.h"
+#include "PktBuffer.h"
+
 #include <limits.h>
 #include "Arduino.h"
 
@@ -11,26 +14,6 @@
 // http://wiki.openmusiclabs.com/wiki/ArduinoFHT
 // http://masteringarduino.blogspot.ru/2013/11/USART.html
 
-class TRingIndex {
-    private:
-        uint8_t sz;
-    public:
-        uint8_t idx;
-
-        TRingIndex (uint8_t size): sz(size), idx(0) { }
-
-        ~TRingIndex() = default;
-
-        uint8_t size() {
-            return sz;
-        }
-        uint8_t CalcFwd (uint8_t fwd = 1) {
-            return (idx + (fwd % sz)) % sz;
-        }
-        void Fwd (uint8_t fwd = 1) {
-            idx = CalcFwd(fwd);
-        }
-};
 
 #define PINLST_SZ 8                                                                // Размер списка пинов
 struct TAnalogPin {
@@ -339,102 +322,20 @@ inline void SetupPins() {
 // Первая часть задает тип телеметрии/команды, а вторая номер ноги:
 // [1][*][*][*][*][*][*][*]
 // [   TYPE   ][    PIN   ]
-// 0x[01234567]* - Запрещены
-// 0x8* - Тестовый вывод
-// 0x9* - Мгновенное значение аналогового пина [*]
-// 0xA* - Максимальное значение аналогового пина [*] за последний период
-// 0xB* - Значение цифрового пина [*]
-// 0x[CDEF]* - Зарезервировано
+// TYPE = [0x00 .. 0x07] - Диапазон типа отчета (3 бита)
+// 0x0* - Тестовый вывод
+// 0x1* - Мгновенное значение аналогового пина [*]
+// 0x2* - Максимальное значение аналогового пина [*] за последний период
+// 0x3* - Значение цифрового пина [*]
+// 0x[4567]* - Зарезервировано
 //        Значениями цифровых пинов могут быть - 0 или 1. Все, что не 0, то является 1.
 
-#define UART_BUF_SZ 64
-struct TUartBuf {
-    uint8_t data[UART_BUF_SZ];     // Буфер
-    TRingIndex head{UART_BUF_SZ};  // Кольцевой индексатор
-    TRingIndex tail{UART_BUF_SZ};  // Кольцевой индексатор
-
-    bool IsEmpty() {
-        return head.idx == tail.idx;
-    }
-
-    bool IsFull() {
-        return head.CalcFwd(1) == tail.idx;
-    }
-
-    uint8_t size() {
-        return (head.idx + UART_BUF_SZ - tail.idx) % UART_BUF_SZ;
-    }
-
-    bool PutC(const uint8_t& ch) {
-        if (IsFull())
-            return false;
-        data[head.idx] = ch;
-        head.Fwd(1);
-        return true;
-    }
-
-    bool GetC(uint8_t& ch) {
-        if (IsEmpty())
-            return false;
-        ch = data[tail.idx];
-        tail.Fwd(1);
-        return true;
-    }
-
-    bool PutPkt(const uint8_t& idType, const uint8_t& idPin, const uint16_t& data ) {
-        uint8_t headOld = head.idx;
-        if (
-            !PutC(idType | idPin | B10000000) ||
-            !PutC(static_cast<uint8_t>((data >> 7) & B01111111)) ||
-            !PutC(static_cast<uint8_t>(data & B01111111))
-        ) {
-            head.idx = headOld;
-            return false;
-        }
-        return true;
-    }
-
-    bool GetPkt(uint8_t& idType, uint8_t& idPin, uint16_t& data ) {
-        uint8_t tailOld = tail.idx;
-        uint8_t pktId = 0;
-
-        START:
-        // Ищем pktId байт пакета
-        while (GetC(pktId) && !(pktId & B10000000)) { } // Считываем байты подряд, пока не встретим id байт
-
-        if (pktId & B10000000) {
-            uint8_t dataHi = 0;
-            uint8_t dataLo = 0;
-            if (!GetC(dataHi) || !GetC(dataLo)) {
-                // Данные пакета еще не приехали. Возвращаем хвост на место!
-                tail.idx = tailOld;
-                return false;
-            }
-            // Проверка на то, что байты являются данными пакета
-            if ((dataHi & B10000000) || (dataLo & B10000000)) {
-                // Приехали не данные, а команды. Что-то поломалось. Устанавливаем хвост на 1 позицию вперед
-                tail.idx = tailOld;
-                tail.Fwd(1);
-                // И повторяем снова!
-                goto START;
-            }
-            idType = pktId & 0xF0;
-            idPin = pktId & 0x0F;
-            data = (static_cast<uint16_t>(dataHi) << 7) | static_cast<uint16_t>(dataLo);
-            return true;
-        }
-
-        // pktId так и не нашли - возвращать хвост не имеет смысла
-        return false;
-    }
-};
-
-volatile TUartBuf uartRxBuf; // Буфер приема
-volatile TUartBuf uartTxBuf; // Буфер передачи
+volatile TPktBuffer uartRxBuf; // Буфер приема
+volatile TPktBuffer uartTxBuf; // Буфер передачи
 
 inline void PrepareTxData() {
 //    uartTxBuf.PutPkt(0x80, 0x05, (static_cast<uint16_t>('O') << 8) | static_cast<uint16_t>('k')); // Тестовый пакет постит строку '…Ok'
-    uartTxBuf.PutC('@');
+    uartTxBuf.Put('@');
 }
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -509,7 +410,7 @@ int InitUsart(uint16_t baud) {
 //Прерывание по отправке данных
 ISR (USART_UDRE_vect) {
     uint8_t data;
-    while (!uartTxBuf.GetC(data)) {
+    while (!uartTxBuf.Get(data)) {
         PrepareTxData(); // Если в буфере нет данных, добавим их туда
     }
     UDR0 = data;
@@ -518,7 +419,7 @@ ISR (USART_UDRE_vect) {
 ////Прерывание по приему данных
 ISR(USART_RX_vect) {
     uint8_t data = UDR0;
-////    while (!uartRxBuf.PutC(data)) {
+////    while (!uartRxBuf.Put(data)) {
 ////        // Если в буфере нет места новым данным, освобождаем место, выкидывая первый пакет,
 ////        // чтобы не нарушать формат пакетов
 ////        uint8_t idType;

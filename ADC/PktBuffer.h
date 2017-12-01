@@ -15,8 +15,6 @@ class TPktBuffer: public TRingBuffer {
             PeekH(1) = static_cast<uint8_t>((data >> 7) & 0b01111111);
             PeekH(2) = static_cast<uint8_t>(data & 0b01111111);
             head.Fwd(3);
-            if (head.idx == tail.idx)
-                isFull = true;
             return true;
         }
         return false;
@@ -27,7 +25,6 @@ class TPktBuffer: public TRingBuffer {
             uint8_t pktId = PeekT(0);
             uint8_t dataHi = PeekT(1);
             uint8_t dataLo = PeekT(2);
-            isFull = false;
             if (   ((pktId  & 0b10000000) != 0)
                 && ((dataHi & 0b10000000) == 0)
                 && ((dataLo & 0b10000000) == 0)

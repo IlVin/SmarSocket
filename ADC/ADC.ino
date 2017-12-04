@@ -1,4 +1,8 @@
 
+#define PINLST_SZ 1            // Размер списка пинов
+#define PKT_LEN 4              // Длина пакета
+#define RING_BUFFER_CAPACITY ((3 * PKT_LEN * PINLST_SZ) + 1)
+
 #include "RingIndex.h"
 #include "PktBuffer.h"
 
@@ -15,13 +19,12 @@
 // http://masteringarduino.blogspot.ru/2013/11/USART.html
 
 
-#define PINLST_SZ 8                                                                // Размер списка пинов
 struct TAnalogPin {
     // Поля, к которым доступ осуществляется и из loop и из ISR
     volatile uint8_t  id;      // Номер физического пина
     volatile uint16_t curVal;  // Мгновенное значение пина
-    volatile uint16_t maxVal;  // Максимальное значение пина за время сэмпла
-    volatile uint16_t minVal;  // Минимальное значение пина за время сэмпла
+    volatile uint16_t maxVal;  // Максимальное значение пина
+    volatile uint16_t minVal;  // Минимальное значение пина
 
     // Поля, к которым доступ осуществляется только из ISR
     uint16_t maxClcVal;        // Временное значение во время вычисления maxVal
@@ -30,14 +33,14 @@ struct TAnalogPin {
     TAnalogPin (uint8_t id):
         id(id),
         curVal(0x0000),
-        maxVal(0x0000),
+        maxVal(0xFFFF & 0b0111111111111111),
         minVal(0x0000),
         maxClcVal(0x0000),
-        minClcVal(0xFFFF) {}
+        minClcVal(0xFFFF & 0b0111111111111111) {}
 };
 
 // Аналоговые пины
-static TAnalogPin aPin[PINLST_SZ] = { A0, A1, A2, A3, A4, A5, A6, A7 };
+static TAnalogPin aPin[PINLST_SZ] = { A3 };//{ A0, A1, A2, A3, A4, A5, A6, A7 };
 TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -97,30 +100,30 @@ TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых п
 
 
 inline void SetupADCSRA() {
-    //        ADEN           = [1]   - Подать питание на АЦП
-    //        |ADSC          = [1]   - Стартовать АЦП c инициализацией
-    //        ||ADATE        = [1]   - Оцифровка по срабатываению триггера ADTS[2:0]
-    //        |||ADIF        = [0]   - флаг прерывания от компаратора
-    //        ||||ADIE       = [1]   - разрешение прерывания от компаратора
-    //        |||||ADPS[2:0] = [110] - Коэффициент делителя частоты АЦП K = 64
+    //        ADEN           - Подать питание на АЦП
+    //        |ADSC          - Стартовать АЦП c инициализацией
+    //        ||ADATE        - Оцифровка по срабатываению триггера ADTS[2:0]
+    //        |||ADIF        - флаг прерывания от компаратора
+    //        ||||ADIE       - разрешение прерывания от компаратора
+    //        |||||ADPS[2:0] - Коэффициент делителя частоты АЦП K = 64
     //        ||||||||
     ADCSRA = B11101110;
 }
 
 inline void SetupADCSRB() {
-    //        ADTS[2:0] = [000]   - Free Running mode
-    //        |||xxxxx  = [00000] - Резервные биты
+    //        ADTS[2:0]      - Free Running mode
+    //        |||xxxxx       - Резервные биты
     //        ||||||||
     ADCSRB = B00000000;
 }
 
-inline void SetupADMUX(uint8_t SRC = 0){
-    //       REFS[1:0]    = [01]  - Источником опорного напряжения является питание
-    //       ||ADLAR      = [0]   - Режим 10 бит
-    //       |||x         = [0]   - Резервный бит
-    //       ||||MUX[3:0] = [SRC] - Источник сигнала
+inline void SetupADMUX(uint8_t src = 0){
+    //       REFS[1:0]        - Источником опорного напряжения является питание
+    //       ||ADLAR          - Режим 10 бит
+    //       |||x             - Резервный бит
+    //       ||||MUX[3:0]     - Источник сигнала
     //       ||||||||
-    ADMUX = B01000000 | (SRC & B00001111);
+    ADMUX = B01000000 | (src & B00001111);
 }
 
 inline void StartAdc() {
@@ -139,37 +142,37 @@ inline void StartAdc() {
 ISR(ADC_vect){
     uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
     uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
-    aPin[aPinIdx.idx].curVal = (hi << 8) | lo;
+    TAnalogPin * pinPtr = &aPin[aPinIdx.idx];
+    uint16_t curVal = (hi << 8) | lo;
+    uint16_t minVal = pinPtr->minClcVal;
+    uint16_t maxVal = pinPtr->maxClcVal;
+    if (curVal < minVal) {
+        pinPtr->minClcVal = curVal;
+    } else if (curVal > maxVal) {
+        pinPtr->maxClcVal = curVal;
+    }
+    pinPtr->curVal = curVal;
+
+    //pinPtr->curVal = aPinIdx.CalcFwd(1);
+    //pinPtr->minClcVal = aPinIdx.idx | 0xa0;
+    //pinPtr->maxClcVal = aPinIdx.idx | 0xe0;
+
     // aPinIdx.idx указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
     // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
     aPinIdx.Fwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
     SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id); // Кладем в буфер номер следующего пина
 }
 
-// WAVE SAMPLE
-#define WAVE_SAMPLE_SZ 500
-uint16_t curWS = 0;
-
-// aPinIdx.tail - указывает на пин, с которым работает вычислитель Min/Max
-TRingIndex aPinIdxTimer(PINLST_SZ);
+volatile TRingIndex aPinIdxTimer{PINLST_SZ};
 ISR(TIMER1_COMPA_vect){
-    if (curWS < WAVE_SAMPLE_SZ) { // Ищем максимальное/минимальное значения
-        uint8_t pinIdx = aPinIdxTimer.idx;
-        uint16_t val = aPin[pinIdx].curVal;
-        if (val > aPin[pinIdx].maxClcVal)
-            aPin[pinIdx].maxClcVal = val;
-        if (val < aPin[pinIdx].minClcVal)
-            aPin[pinIdx].minClcVal = val;
-        curWS++;
-    } else {
-        uint8_t pinIdx = aPinIdxTimer.idx;
-        aPin[pinIdx].maxVal = aPin[pinIdx].maxClcVal;
-        aPin[pinIdx].maxClcVal = 0x0000;
-        aPin[pinIdx].minVal = aPin[pinIdx].minClcVal;
-        aPin[pinIdx].minClcVal = 0xFFFF;
-        curWS = 0;
-        aPinIdxTimer.Fwd(1);
-    }
+    TAnalogPin * pinPtr = &aPin[aPinIdxTimer.idx];
+    pinPtr->maxVal = pinPtr->maxClcVal;
+    pinPtr->minVal = pinPtr->minClcVal;
+    pinPtr->maxClcVal = pinPtr->curVal;
+    pinPtr->minClcVal = pinPtr->curVal;
+//        pinPtr->minVal = aPinIdxTimer.idx;
+//        pinPtr->maxVal = (5 + 1) % 8;
+    aPinIdxTimer.Fwd(1);
 }
 
 /* ************ TIMER ***************** */
@@ -228,8 +231,7 @@ ISR(TIMER1_COMPA_vect){
 
 // https://github.com/radiolok/arduino_rms_count/blob/master/Urms_calc/Urms_calc.pde
 
-#define WAVE_FREQ 40         // Частота исследуемой волны
-#define CPU_FREQ 16000000    // Частота процессора
+#define WAVE_FREQ 40         // Минимальная частота исследуемой волны
 
 inline void StartTimer1() {
     //        COMnA1       = [0] - контролируют поведение выводов OCnA
@@ -255,7 +257,7 @@ inline void StartTimer1() {
     TIMSK1 = B00000010;
 
     // IF OCRnA == TCNTn THEN INTERRUPT
-    OCR1A = CPU_FREQ / (WAVE_SAMPLE_SZ * WAVE_FREQ);
+    OCR1A = F_CPU / (PINLST_SZ * WAVE_FREQ);
     //OCR1A = 1600;
 
     //        ICNC1       = [0] - PWM
@@ -276,7 +278,7 @@ inline void StopTimer1() {
 
 // Установка режима пинов
 inline void SetupPins() {
-    for (int8_t pinIdx = PINLST_SZ; --pinIdx;) {
+    for (int8_t pinIdx = PINLST_SZ; pinIdx--;) {
         pinMode(aPin[pinIdx].id, INPUT);
     };
 }
@@ -323,19 +325,24 @@ inline void SetupPins() {
 // [1][*][*][*][*][*][*][*]
 // [   TYPE   ][    PIN   ]
 // TYPE = [0x00 .. 0x07] - Диапазон типа отчета (3 бита)
-// 0x0* - Тестовый вывод
-// 0x1* - Мгновенное значение аналогового пина [*]
-// 0x2* - Максимальное значение аналогового пина [*] за последний период
-// 0x3* - Значение цифрового пина [*]
+// 0x00 - Тестовый вывод
+// 0x01 - Мгновенное значение аналогового пина [*]
+// 0x02 - Минимальное значение аналогового пина [*] за последний период
+// 0x03 - Максимальное значение аналогового пина [*] за последний период
+// 0x04 - Значение цифрового пина [*]
 // 0x[4567]* - Зарезервировано
 //        Значениями цифровых пинов могут быть - 0 или 1. Все, что не 0, то является 1.
 
-volatile TPktBuffer uartRxBuf; // Буфер приема
-volatile TPktBuffer uartTxBuf; // Буфер передачи
+TPktBuffer uartRxBuf; // Буфер приема
+TPktBuffer uartTxBuf; // Буфер передачи
 
+TRingIndex prepareIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 inline void PrepareTxData() {
-//    uartTxBuf.PutPkt(0x80, 0x05, (static_cast<uint16_t>('O') << 8) | static_cast<uint16_t>('k')); // Тестовый пакет постит строку '…Ok'
-    uartTxBuf.Put('@');
+    uint8_t idx = prepareIdx.idx;
+    uartTxBuf.PutPkt(0x01, idx, aPin[idx].curVal);
+    uartTxBuf.PutPkt(0x02, idx, aPin[idx].minVal);
+    uartTxBuf.PutPkt(0x03, idx, aPin[idx].maxVal);
+    prepareIdx.Fwd(1);
 }
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
@@ -441,8 +448,6 @@ void setup() {
 void loop() {
     digitalWrite(13, HIGH);   // turn the LED on (HIGH is the voltage level)
     delay(1000);              // wait for a second
-    //PrepareTxData();
-    UDR0 = '\n';
     digitalWrite(13, LOW);    // turn the LED off by making the voltage LOW
     delay(1000);
 }

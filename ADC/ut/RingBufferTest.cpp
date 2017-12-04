@@ -2,8 +2,8 @@
 #define RING_BUFFER_CAPACITY 4
 #include "RingBuffer.h"
 
-#include <iostream>
-#include <string>
+//#include <iostream>
+//#include <string>
 #include <assert.h>
 
 int main() {

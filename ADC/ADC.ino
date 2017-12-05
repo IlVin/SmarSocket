@@ -3,6 +3,8 @@
 #define PKT_LEN 4              // Длина пакета
 #define RING_BUFFER_CAPACITY ((3 * PKT_LEN * PINLST_SZ) + 1)
 
+#define WAVE_PERIOD 30         // Продолжительность периода волны в миллисекундах 20ms ~ 50Гц
+
 #include "RingIndex.h"
 #include "PktBuffer.h"
 
@@ -104,7 +106,7 @@ inline void SetupADCSRA() {
 }
 
 inline void SetupADCSRB() {
-    //        ADTS[2:0]      - Free Running mode
+    //        ADTS[2:0]      - Free Running mode, если установлен ADATE
     //        |||xxxxx       - Резервные биты
     //        ||||||||
     ADCSRB = B00000000;
@@ -112,7 +114,7 @@ inline void SetupADCSRB() {
 
 inline void SetupADMUX(uint8_t src = 0){
     //       REFS[1:0]        - Источником опорного напряжения является питание
-    //       ||ADLAR          - Режим 10 бит
+    //       ||ADLAR          - Режим выравнивания
     //       |||x             - Резервный бит
     //       ||||MUX[3:0]     - Источник сигнала
     //       ||||||||
@@ -151,6 +153,8 @@ ISR(ADC_vect){
     SetupADMUX(aPin[aPinIdx.idx].id); // Кладем в буфер номер следующего пина
     SetupADCSRA();                    // АЦП начал оцифровывать пин [n]
 
+// aPin[idx].curVal++;
+// uint16_t curVal = aPin[idx].curVal;
     uint16_t curVal = (hi << 8) | lo;
     uint16_t minVal = aPin[idx].minClcVal;
     uint16_t maxVal = aPin[idx].maxClcVal;
@@ -160,7 +164,6 @@ ISR(ADC_vect){
         aPin[idx].maxClcVal = curVal;
     }
     aPin[idx].curVal = curVal;
-
 }
 
 /* ******************************
@@ -316,22 +319,35 @@ ISR(USART_RX_vect) {
 ////    }
 }
 /* *************************************** */
+volatile long prevMillis = millis();
+
+// Обновление минимальных и максимальных показаний датчиков за время ADC_PERIOD
+void RefreshMinMax() {
+    for (uint8_t idx = PINLST_SZ; idx--;) {
+        aPin[idx].minVal = aPin[idx].minClcVal;
+        aPin[idx].maxVal = aPin[idx].maxClcVal;
+// aPin[idx].curVal = 0;
+        aPin[idx].minClcVal = aPin[idx].curVal;
+        aPin[idx].maxClcVal = aPin[idx].curVal;
+    }
+}
 
 void setup() {
-    pinMode(13, OUTPUT);
     StartAdc();
+    sei();
+    delay(WAVE_PERIOD);
+    RefreshMinMax();
     InitUsart(19200);
+    prevMillis = millis();
 }
 
 void loop() {
-    for (uint8_t idx = PINLST_SZ; idx--;) {
-        uint8_t oldSREG = SREG;
-        cli();
-        aPin[idx].minVal = aPin[idx].minClcVal;
-        aPin[idx].maxVal = aPin[idx].maxClcVal;
-        aPin[idx].minClcVal = aPin[idx].curVal;
-        aPin[idx].maxClcVal = aPin[idx].curVal;
-        SREG = oldSREG;
-    }
-    delay(20);
+
+    uint8_t oldSREG = SREG;
+    cli();
+    RefreshMinMax();
+    SREG = oldSREG;
+
+    while (millis() - prevMillis < WAVE_PERIOD);
+    prevMillis = millis();
 }

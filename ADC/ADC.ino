@@ -90,11 +90,6 @@ struct TAnalogPin {
 // MUX[3:0] (Multiplexer Selection Input) — биты выбора аналогового входа.
 //      MUX[3:0]: B0000, B0001, B0010, B0011, B0100, B0101, B0110, B0111, B1000, B1110,      B1111
 //      Source  : ADC0,  ADC1,  ADC2,  ADC3,  ADC4,  ADC5,  ADC6,  ADC7,  Temp,  VBG(1.1В),  GND(0В)
-// SREG.C=1: флаг переноса (CARRY) - указывает на переполнение при выполнении арифметической или логической операции
-// SREG.Z=1: нулевой флаг (ZERO) - устанавливается, когда результат арифметической/логической операции равен 0. Если результат не равен 0, то флаг сбрасывается.
-// SREG.N=1: флаг отрицательного результат (NEGATIVE) - устанавливается, когда результат арифметической/логической операции меньше 0
-// SREG.T  - флаг копирования (Transfer of Copy). Используется программистом по своему усмотрению
-// SREG.I=1 - прерывания разрешены
 
 
 inline void SetupADCSRA() {
@@ -149,13 +144,12 @@ inline void StartAdc() {
 // Поэтому изменения вступают в силу в безопасный момент -  в течение одного такта синхронизации АЦП перед оцифровкой сигнала.
 // Если выполнено чтение ADCL, то доступ к этим регистрам для АЦП будет заблокирован, пока не будет считан регистр ADCH.
 ISR(ADC_vect){
+    uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
+    uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
+    uint8_t idx = aPinIdx.idx;
     aPinIdx.Fwd(1);
     SetupADMUX(aPin[aPinIdx.idx].id); // Кладем в буфер номер следующего пина
     SetupADCSRA();                    // АЦП начал оцифровывать пин [n]
-
-    uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
-    uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
-    uint8_t idx = ADMUX & 0x0F;
 
     uint16_t curVal = (hi << 8) | lo;
     uint16_t minVal = aPin[idx].minClcVal;
@@ -167,23 +161,16 @@ ISR(ADC_vect){
     }
     aPin[idx].curVal = curVal;
 
-    if (adcCnt == 4000) {
+    if (adcCnt >= 400) {
         aPin[idx].minVal = aPin[idx].minClcVal;
         aPin[idx].maxVal = aPin[idx].maxClcVal;
         aPin[idx].minClcVal = curVal;
         aPin[idx].maxClcVal = curVal;
-    } else if (adcCnt >= 4008) {
+    } 
+    if (adcCnt == 408) {
         adcCnt = 0;
-    } else {
-        adcCnt++;
     }
-}
-
-// Установка режима пинов
-inline void SetupPins() {
-    for (int8_t pinIdx = PINLST_SZ; pinIdx--;) {
-        pinMode(aPin[pinIdx].id, INPUT);
-    };
+    adcCnt++;
 }
 
 /* ******************************
@@ -342,7 +329,6 @@ ISR(USART_RX_vect) {
 
 void setup() {
     pinMode(13, OUTPUT);
-    SetupPins();
     StartAdc();
     InitUsart(19200);
 }

@@ -9,7 +9,7 @@
 
 class TRingBuffer {
     protected:
-    volatile uint8_t data[RING_BUFFER_CAPACITY]; // Буфер
+    uint8_t data[RING_BUFFER_CAPACITY]; // Буфер
     TRingIndex head{RING_BUFFER_CAPACITY};       // Кольцевой индексатор
     TRingIndex tail{RING_BUFFER_CAPACITY};       // Кольцевой индексатор
 
@@ -50,15 +50,15 @@ class TRingBuffer {
         return true;
     }
 
-    inline volatile uint8_t& PeekT (uint8_t idx) {
+    inline uint8_t& PeekT (uint8_t idx) {
         return data[tail.CalcFwd(idx)];
     }
 
-    inline volatile uint8_t& PeekH (uint8_t idx) {
+    inline uint8_t& PeekH (uint8_t idx) {
         return data[head.CalcFwd(idx)];
     }
 
-    inline volatile uint8_t& operator[] (uint8_t idx) {
+    inline uint8_t& operator[] (uint8_t idx) {
         return PeekT(idx);
     }
 };

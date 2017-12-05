@@ -7,7 +7,7 @@ class TRingIndex {
     uint8_t sz;
 
     public:
-    volatile uint8_t idx;
+    uint8_t idx;
 
     TRingIndex (uint8_t size): sz(size), idx(0) { }
 

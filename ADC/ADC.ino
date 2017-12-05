@@ -23,10 +23,10 @@
 
 struct TAnalogPin {
     // Поля, к которым доступ осуществляется и из loop и из ISR
-    volatile uint8_t  id;      // Номер физического пина
-    volatile uint16_t curVal;  // Мгновенное значение пина
-    volatile uint16_t maxVal;  // Максимальное значение пина
-    volatile uint16_t minVal;  // Минимальное значение пина
+    uint8_t  id;      // Номер физического пина
+    uint16_t curVal;  // Мгновенное значение пина
+    uint16_t maxVal;  // Максимальное значение пина
+    uint16_t minVal;  // Минимальное значение пина
 
     // Поля, к которым доступ осуществляется только из ISR
     uint16_t maxClcVal;        // Временное значение во время вычисления maxVal
@@ -120,7 +120,7 @@ inline void SetupADMUX(uint8_t src = 0){
 }
 
 // Аналоговые пины
-static TAnalogPin aPin[PINLST_SZ] = {
+volatile static TAnalogPin aPin[PINLST_SZ] = {
     0b0000, // A0
     0b0001, // A1
     0b0010, // A2,
@@ -130,8 +130,8 @@ static TAnalogPin aPin[PINLST_SZ] = {
     0b0110, // A6,
     0b0111  // A7
 };
-static TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
-static uint16_t adcCnt = 0;
+volatile static TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
+volatile static uint16_t adcCnt = 0;
 
 inline void StartAdc() {
     SetupADCSRB();
@@ -223,10 +223,10 @@ ISR(ADC_vect){
 // 0x[4567]* - Зарезервировано
 //        Значениями цифровых пинов могут быть - 0 или 1. Все, что не 0, то является 1.
 
-TPktBuffer uartRxBuf; // Буфер приема
-TPktBuffer uartTxBuf; // Буфер передачи
+volatile TPktBuffer uartRxBuf; // Буфер приема
+volatile TPktBuffer uartTxBuf; // Буфер передачи
+volatile TRingIndex prepareIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 
-TRingIndex prepareIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 inline void PrepareTxData() {
     uint8_t idx = prepareIdx.idx;
     uartTxBuf.PutPkt(0x01, idx, aPin[idx].curVal);

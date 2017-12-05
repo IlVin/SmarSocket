@@ -131,9 +131,9 @@ volatile static TAnalogPin aPin[PINLST_SZ] = {
     0b0111  // A7
 };
 volatile static TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
-volatile static uint16_t adcCnt = 0;
 
 inline void StartAdc() {
+    DIDR0 = 0xFF;                              // Отключить цифровые входы от АЦП
     SetupADCSRB();
     SetupADMUX(aPin[aPinIdx.idx].id);          // Записываем в буфер текущий пин [n]
     SetupADCSRA();                             // АЦП начал оцифровывать пин [n]
@@ -161,16 +161,6 @@ ISR(ADC_vect){
     }
     aPin[idx].curVal = curVal;
 
-    if (adcCnt >= 400) {
-        aPin[idx].minVal = aPin[idx].minClcVal;
-        aPin[idx].maxVal = aPin[idx].maxClcVal;
-        aPin[idx].minClcVal = curVal;
-        aPin[idx].maxClcVal = curVal;
-    } 
-    if (adcCnt == 408) {
-        adcCnt = 0;
-    }
-    adcCnt++;
 }
 
 /* ******************************
@@ -334,8 +324,14 @@ void setup() {
 }
 
 void loop() {
-//    digitalWrite(13, HIGH);   // turn the LED on (HIGH is the voltage level)
-//    delay(1000);              // wait for a second
-//    digitalWrite(13, LOW);    // turn the LED off by making the voltage LOW
-//    delay(1000);
+    for (uint8_t idx = PINLST_SZ; idx--;) {
+        uint8_t oldSREG = SREG;
+        cli();
+        aPin[idx].minVal = aPin[idx].minClcVal;
+        aPin[idx].maxVal = aPin[idx].maxClcVal;
+        aPin[idx].minClcVal = aPin[idx].curVal;
+        aPin[idx].maxClcVal = aPin[idx].curVal;
+        SREG = oldSREG;
+    }
+    delay(20);
 }

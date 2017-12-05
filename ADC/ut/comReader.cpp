@@ -101,6 +101,11 @@ int main(void) {
                         << "; maxVal = " << std::setw(4) << aPin[idx].maxVal
                         << std::endl;
                 }
+                for (int idx = 0; idx < 8; idx ++) {
+                    if (aPin[idx].maxVal - aPin[idx].minVal > 0x0F) {
+                        std::cout << "FALSE RESULT !!!!!!!" << std::endl;
+                    }
+                }
             }
         } while (true);
     }

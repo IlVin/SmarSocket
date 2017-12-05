@@ -1,5 +1,5 @@
 
-#define PINLST_SZ 1            // Размер списка пинов
+#define PINLST_SZ 8            // Размер списка пинов
 #define PKT_LEN 4              // Длина пакета
 #define RING_BUFFER_CAPACITY ((3 * PKT_LEN * PINLST_SZ) + 1)
 
@@ -18,6 +18,8 @@
 // http://wiki.openmusiclabs.com/wiki/ArduinoFHT
 // http://masteringarduino.blogspot.ru/2013/11/USART.html
 
+//http://www.avrbeginners.net/architecture/adc/adc.html - Объясняется как переключать ADMUX
+
 
 struct TAnalogPin {
     // Поля, к которым доступ осуществляется и из loop и из ISR
@@ -27,8 +29,8 @@ struct TAnalogPin {
     volatile uint16_t minVal;  // Минимальное значение пина
 
     // Поля, к которым доступ осуществляется только из ISR
-    uint16_t maxClcVal;        // Временное значение во время вычисления maxVal
-    uint16_t minClcVal;        // Временное значение во время вычисления minVal
+    volatile uint16_t maxClcVal;        // Временное значение во время вычисления maxVal
+    volatile uint16_t minClcVal;        // Временное значение во время вычисления minVal
 
     TAnalogPin (uint8_t id):
         id(id),
@@ -40,8 +42,17 @@ struct TAnalogPin {
 };
 
 // Аналоговые пины
-static TAnalogPin aPin[PINLST_SZ] = { A3 };//{ A0, A1, A2, A3, A4, A5, A6, A7 };
-TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
+volatile static TAnalogPin aPin[PINLST_SZ] = {
+    0b0000, // A0
+    0b0001, // A1
+    0b0010, // A2,
+    0b0011, // A3,
+    0b0100, // A4,
+    0b0101, // A5,
+    0b0110, // A6,
+    0b0111  // A7
+};
+volatile static TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -131,6 +142,8 @@ inline void StartAdc() {
     SetupADMUX(aPin[aPinIdx.idx].id);          // Записываем в буфер текущий пин [n]
     sei();                                     // Прерывания нужно разрешить
     SetupADCSRA();                             // АЦП начал оцифровывать пин [n]
+    // Ждем не менее 1 такта ADC. Делитель тактов ADC K = 64
+    delayMicroseconds(4 + 1);
     SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id);   // Записываем в буфер номер следующего пина [n+1],
                                                // который АЦП будет оцифровывать во время прерывания
 }
@@ -142,36 +155,32 @@ inline void StartAdc() {
 ISR(ADC_vect){
     uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
     uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
-    TAnalogPin * pinPtr = &aPin[aPinIdx.idx];
-    uint16_t curVal = (hi << 8) | lo;
-    uint16_t minVal = pinPtr->minClcVal;
-    uint16_t maxVal = pinPtr->maxClcVal;
-    if (curVal < minVal) {
-        pinPtr->minClcVal = curVal;
-    } else if (curVal > maxVal) {
-        pinPtr->maxClcVal = curVal;
+    uint8_t idx = aPinIdx.idx;
+    if (aPin[idx].id == (ADMUX & 0b00001111)) {
+        uint16_t curVal = (hi << 8) | lo;
+        uint16_t minVal = aPin[idx].minClcVal;
+        uint16_t maxVal = aPin[idx].maxClcVal;
+        if (curVal < minVal) {
+            aPin[idx].minClcVal = curVal;
+        } else if (curVal > maxVal) {
+            aPin[idx].maxClcVal = curVal;
+        }
+        aPin[idx].curVal = curVal;
+        // aPinIdx.idx указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
+        // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
+        SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id); // Кладем в буфер номер следующего пина
+    } else {
+        aPinIdx.Fwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
     }
-    pinPtr->curVal = curVal;
-
-    //pinPtr->curVal = aPinIdx.CalcFwd(1);
-    //pinPtr->minClcVal = aPinIdx.idx | 0xa0;
-    //pinPtr->maxClcVal = aPinIdx.idx | 0xe0;
-
-    // aPinIdx.idx указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
-    // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
-    aPinIdx.Fwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
-    SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id); // Кладем в буфер номер следующего пина
 }
 
 volatile TRingIndex aPinIdxTimer{PINLST_SZ};
 ISR(TIMER1_COMPA_vect){
-    TAnalogPin * pinPtr = &aPin[aPinIdxTimer.idx];
-    pinPtr->maxVal = pinPtr->maxClcVal;
-    pinPtr->minVal = pinPtr->minClcVal;
-    pinPtr->maxClcVal = pinPtr->curVal;
-    pinPtr->minClcVal = pinPtr->curVal;
-//        pinPtr->minVal = aPinIdxTimer.idx;
-//        pinPtr->maxVal = (5 + 1) % 8;
+    uint8_t idx = aPinIdxTimer.idx;
+    aPin[idx].maxVal = aPin[idx].maxClcVal;
+    aPin[idx].minVal = aPin[idx].minClcVal;
+    aPin[idx].maxClcVal = aPin[idx].curVal;
+    aPin[idx].minClcVal = aPin[idx].curVal;
     aPinIdxTimer.Fwd(1);
 }
 

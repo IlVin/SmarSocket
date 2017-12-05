@@ -29,8 +29,8 @@ struct TAnalogPin {
     volatile uint16_t minVal;  // Минимальное значение пина
 
     // Поля, к которым доступ осуществляется только из ISR
-    volatile uint16_t maxClcVal;        // Временное значение во время вычисления maxVal
-    volatile uint16_t minClcVal;        // Временное значение во время вычисления minVal
+    uint16_t maxClcVal;        // Временное значение во время вычисления maxVal
+    uint16_t minClcVal;        // Временное значение во время вычисления minVal
 
     TAnalogPin (uint8_t id):
         id(id),
@@ -40,19 +40,6 @@ struct TAnalogPin {
         maxClcVal(0x0000),
         minClcVal(0xFFFF & 0b0111111111111111) {}
 };
-
-// Аналоговые пины
-volatile static TAnalogPin aPin[PINLST_SZ] = {
-    0b0000, // A0
-    0b0001, // A1
-    0b0010, // A2,
-    0b0011, // A3,
-    0b0100, // A4,
-    0b0101, // A5,
-    0b0110, // A6,
-    0b0111  // A7
-};
-volatile static TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
 
 // +----------+-------+-------+-------+-------+-------+-------+-------+-------+
 // | Регистры | Биты                                                          |
@@ -118,7 +105,7 @@ inline void SetupADCSRA() {
     //        ||||ADIE       - разрешение прерывания от компаратора
     //        |||||ADPS[2:0] - Коэффициент делителя частоты АЦП K = 64
     //        ||||||||
-    ADCSRA = B11101110;
+    ADCSRA = B11001110;
 }
 
 inline void SetupADCSRB() {
@@ -137,15 +124,24 @@ inline void SetupADMUX(uint8_t src = 0){
     ADMUX = B01000000 | (src & B00001111);
 }
 
+// Аналоговые пины
+static TAnalogPin aPin[PINLST_SZ] = {
+    0b0000, // A0
+    0b0001, // A1
+    0b0010, // A2,
+    0b0011, // A3,
+    0b0100, // A4,
+    0b0101, // A5,
+    0b0110, // A6,
+    0b0111  // A7
+};
+static TRingIndex aPinIdx {PINLST_SZ};  // Индексатор аналоговых пинов
+static uint16_t adcCnt = 0;
+
 inline void StartAdc() {
     SetupADCSRB();
     SetupADMUX(aPin[aPinIdx.idx].id);          // Записываем в буфер текущий пин [n]
-    sei();                                     // Прерывания нужно разрешить
     SetupADCSRA();                             // АЦП начал оцифровывать пин [n]
-    // Ждем не менее 1 такта ADC. Делитель тактов ADC K = 64
-    delayMicroseconds(4 + 1);
-    SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id);   // Записываем в буфер номер следующего пина [n+1],
-                                               // который АЦП будет оцифровывать во время прерывания
 }
 
 /* **** Interrupt service routine **** */
@@ -153,136 +149,34 @@ inline void StartAdc() {
 // Поэтому изменения вступают в силу в безопасный момент -  в течение одного такта синхронизации АЦП перед оцифровкой сигнала.
 // Если выполнено чтение ADCL, то доступ к этим регистрам для АЦП будет заблокирован, пока не будет считан регистр ADCH.
 ISR(ADC_vect){
+    aPinIdx.Fwd(1);
+    SetupADMUX(aPin[aPinIdx.idx].id); // Кладем в буфер номер следующего пина
+    SetupADCSRA();                    // АЦП начал оцифровывать пин [n]
+
     uint8_t lo = ADCL; // Автоматически блокируется доступ АЦП к регистрам ADCL и ADCH
     uint8_t hi = ADCH; // Автоматически разблокируется доступ АЦП к регистрам ADCL и ADCH
-    uint8_t idx = aPinIdx.idx;
-    if (aPin[idx].id == (ADMUX & 0b00001111)) {
-        uint16_t curVal = (hi << 8) | lo;
-        uint16_t minVal = aPin[idx].minClcVal;
-        uint16_t maxVal = aPin[idx].maxClcVal;
-        if (curVal < minVal) {
-            aPin[idx].minClcVal = curVal;
-        } else if (curVal > maxVal) {
-            aPin[idx].maxClcVal = curVal;
-        }
-        aPin[idx].curVal = curVal;
-        // aPinIdx.idx указывает на предыдущий пин [n-1] - именно для него АЦП прислал результат
-        // ADMUX указывает на пин [n], который в данный момент оцифровывает АЦП
-        SetupADMUX(aPin[aPinIdx.CalcFwd(1)].id); // Кладем в буфер номер следующего пина
-    } else {
-        aPinIdx.Fwd(1); // Переходим на пин [n], для которого результат будет готов в следующем прерывании
+    uint8_t idx = ADMUX & 0x0F;
+
+    uint16_t curVal = (hi << 8) | lo;
+    uint16_t minVal = aPin[idx].minClcVal;
+    uint16_t maxVal = aPin[idx].maxClcVal;
+    if (curVal < minVal) {
+        aPin[idx].minClcVal = curVal;
+    } else if (curVal > maxVal) {
+        aPin[idx].maxClcVal = curVal;
     }
-}
+    aPin[idx].curVal = curVal;
 
-volatile TRingIndex aPinIdxTimer{PINLST_SZ};
-ISR(TIMER1_COMPA_vect){
-    uint8_t idx = aPinIdxTimer.idx;
-    aPin[idx].maxVal = aPin[idx].maxClcVal;
-    aPin[idx].minVal = aPin[idx].minClcVal;
-    aPin[idx].maxClcVal = aPin[idx].curVal;
-    aPin[idx].minClcVal = aPin[idx].curVal;
-    aPinIdxTimer.Fwd(1);
-}
-
-/* ************ TIMER ***************** */
-// http://narodstream.ru/avr-urok-10-tajmery-schetchiki-preryvaniya/
-//
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | Регистры | Биты                                                          |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// |          |   7   |   6   |   5   |   4   |   3   |   2   |   1   |   0   |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | TCNTn    | Количество тиков таймера                                      |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | OCRnA    | Младший байт значения останова счетчика                       |
-// +----------+---------------+-------+-------+-------+-------+-------+-------+
-// | OCRnB    | Старший байт значения останова счетчика                       |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | TCCRnA   | COMnA1| COMnA0| COMnB1| COMnB0| COMnC1| COMnC0| WGMn1 | WGMn0 |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | TCCRnB   | ICNCn | ICESn |   x   | WGMn3 | WGMn2 | CSn2  | CSn1  | CSn0  |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | TCCRnC   | FOCnA | FOCnB |   x   |   x   |   x   |   x   |   x   |   x   |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// | TIMSKn   |   x   |   x   | ICIEn |   x   | OCIEnC| OCIEnB| OCIEnA| TOIEn |
-// +----------+-------+-------+-------+-------+-------+-------+-------+-------+
-// TCNTn = TCNTnH[15:8] + TCNTnL[7:0] - Счетчик тиков таймера
-// OCRnA = OCRnAH[15:8] + OCRnAL[7:0], OCRnB = OCRnBH[15:8] + OCRnBL[7:0] - Числа, с которыми сравнивается TCNTn
-// TCCRnA - Timer/Counter Control Register A
-//      COMnA1,COMnA0, COMnB1 и COMnB0 - контролируют поведение выводов OC1A и OC1B
-//      FOC1A, FOC1B, WGM11 и WGM10 служат для задания работы ТС1 как широтно-импульсного модулятора.
-// TCCRnB - Timer/Counter Control Register B
-//      ICNCn - Input Capture Noise Canceler (for PWM)
-//      ICESn - Input Capture Edge Select    (for PWM)
-//      WGMn[3:2] - Waveform Generation Mode (for PWM)
-//      CSn[2:0]  - Clock Select
-//      +------+------+------+--------------------------------------------------------+
-//      | CSn2 | CSn1 | CSn0 | Description                                            |
-//      +------+------+------+--------------------------------------------------------+
-//      |  0   |  0   |  0   | No clock source. (Timer/Counter stopped)               |
-//      |  0   |  0   |  1   | CLK/1                                                  |
-//      |  0   |  1   |  0   | CLK/8                                                  |
-//      |  0   |  1   |  1   | CLK/64                                                 |
-//      |  1   |  0   |  0   | CLK/256                                                |
-//      |  1   |  0   |  1   | CLK/1024                                               |
-//      |  1   |  1   |  0   | External clock source on Tn pin. Clock on falling edge |
-//      |  1   |  1   |  1   | External clock source on Tn pin. Clock on rising edge  |
-//      +------+------+------+--------------------------------------------------------+
-
-// FOCnA  - Force Output Compare for Channel A
-// TIMSKn - Timer/Counter Interrupt Mask Register
-//      TICIEn - Timer/Countern, Input Capture Interrupt Enable
-//      OCIEnC - Timer/Countern, Output Compare C Match Interrupt Enable
-//      OCIEnB - Timer/Countern, Output Compare B Match Interrupt Enable
-//      OCIEnA - Timer/Countern, Output Compare A Match Interrupt Enable
-//      TOIEn  - Timer/Countern, Overflow Interrupt Enable
-
-
-// https://github.com/radiolok/arduino_rms_count/blob/master/Urms_calc/Urms_calc.pde
-
-#define WAVE_FREQ 40         // Минимальная частота исследуемой волны
-
-inline void StartTimer1() {
-    //        COMnA1       = [0] - контролируют поведение выводов OCnA
-    //        |COMnA0      = [0] - контролируют поведение выводов OCnA
-    //        ||COMnB1     = [0] - контролируют поведение выводов OCnB
-    //        |||COMnB0    = [0] - контролируют поведение выводов OCnB
-    //        ||||COMnC1   = [0] - контролируют поведение выводов OCnC
-    //        |||||COMnC0  = [0] - контролируют поведение выводов OCnC
-    //        ||||||WGMn1  = [0] - Режим СТС (сброс по совпадению) WGMn = [0100]
-    //        |||||||WGMn0 = [0] - Режим СТС (сброс по совпадению) WGMn = [0100]
-    //        ||||||||
-    TCCR1A = B00000000;
-
-    //        x            = [0]
-    //        |x           = [0]
-    //        ||ICIE1      = [0] - Input Capture Interrupt Enable
-    //        |||x         = [0]
-    //        ||||OCIE1C   = [0] - Прерывание типа [TIMER1 COMPC] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1C(H и L))
-    //        |||||OCIE1B  = [0] - Прерывание типа [TIMER1 COMPB] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1B(H и L))
-    //        ||||||OCIE1A = [1] - Прерывание типа [TIMER1 COMPA] (разрешение прерывания TCNT1 счетчика по совпадению с OCR1A(H и L))
-    //        |||||||TOIE1 = [0] - процессор реагирует на сигнал переполнения ТС1 и вызывает прерывание.
-    //        ||||||||
-    TIMSK1 = B00000010;
-
-    // IF OCRnA == TCNTn THEN INTERRUPT
-    OCR1A = F_CPU / (PINLST_SZ * WAVE_FREQ);
-    //OCR1A = 1600;
-
-    //        ICNC1       = [0] - PWM
-    //        |ICES1      = [0] - PWM
-    //        ||x         = [0]
-    //        |||WGM13    = [0] - Режим СТС (сброс по совпадению) WGMn = [0100]
-    //        ||||WGM12   = [1] - Режим СТС (сброс по совпадению) WGMn = [0100]
-    //        |||||CS12   = [0] - Делитель (CLK/1) CSn = [001] [101]
-    //        ||||||CS11  = [0] - Делитель (CLK/1) CSn = [001]
-    //        |||||||CS10 = [1] - Делитель (CLK/1) CSn = [001]
-    //        ||||||||
-    TCCR1B = B00001001;
-}
-
-inline void StopTimer1() {
-    TCCR1B = 0;
+    if (adcCnt == 4000) {
+        aPin[idx].minVal = aPin[idx].minClcVal;
+        aPin[idx].maxVal = aPin[idx].maxClcVal;
+        aPin[idx].minClcVal = curVal;
+        aPin[idx].maxClcVal = curVal;
+    } else if (adcCnt >= 4008) {
+        adcCnt = 0;
+    } else {
+        adcCnt++;
+    }
 }
 
 // Установка режима пинов
@@ -450,13 +344,12 @@ void setup() {
     pinMode(13, OUTPUT);
     SetupPins();
     StartAdc();
-    StartTimer1();
     InitUsart(19200);
 }
 
 void loop() {
-    digitalWrite(13, HIGH);   // turn the LED on (HIGH is the voltage level)
-    delay(1000);              // wait for a second
-    digitalWrite(13, LOW);    // turn the LED off by making the voltage LOW
-    delay(1000);
+//    digitalWrite(13, HIGH);   // turn the LED on (HIGH is the voltage level)
+//    delay(1000);              // wait for a second
+//    digitalWrite(13, LOW);    // turn the LED off by making the voltage LOW
+//    delay(1000);
 }

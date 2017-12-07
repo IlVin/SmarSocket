@@ -139,3 +139,5 @@ Freq = 1/T = 1/0.0008 = 1200 Гц
 * http://www.ti.com/lit/gpn/cd74hc4067
 * http://espressif.com/sites/default/files/documentation/0a-esp8266ex_datasheet_en.pdf
 * http://www.atmel.com/Images/Atmel-9365-Automotive-Microcontrollers-ATmega88-ATmega168_Datasheet.pdf
+* http://www.st.com/content/ccc/resource/technical/document/datasheet/33/d4/6f/1d/df/0b/4c/6d/CD00161566.pdf/files/CD00161566.pdf/jcr:content/translations/en.CD00161566.pdf
+

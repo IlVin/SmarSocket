@@ -238,7 +238,7 @@ class TRingIndex {
 ## Передача телеметрии в блок управления
 
 ### Циклический буфер
-Для временного хранения передаваемых в блок управления данных используем примитив
+Для временного хранения очереди передаваемых в блок управления данных используем примитив
 "Циклический буфер". Он подходит нам потому, что добавление и удаление данных в начало и в
 конец его происходит за постоянное время.
 
@@ -325,3 +325,5 @@ class TRingBuffer {
 * http://www.atmel.com/Images/Atmel-9365-Automotive-Microcontrollers-ATmega88-ATmega168_Datasheet.pdf
 * http://www.st.com/content/ccc/resource/technical/document/datasheet/33/d4/6f/1d/df/0b/4c/6d/CD00161566.pdf/files/CD00161566.pdf/jcr:content/translations/en.CD00161566.pdf
 * https://arduinonsk.ru/blog/94-perevod-overklokking-atsp-i-semplirovanie-vysokoimpedansnykh-istochnikov
+* https://ru.wikipedia.org/wiki/%D0%9A%D0%BE%D0%BB%D1%8C%D1%86%D0%B5%D0%B2%D0%BE%D0%B9_%D0%B1%D1%83%D1%84%D0%B5%D1%80
+* 

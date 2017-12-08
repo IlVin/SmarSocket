@@ -192,14 +192,14 @@ Single conversion mode, когда между аналого-цифровыми 
 тактов (примерно 12, судя по режиму First conversion), за которые конденсатор удержания
 успевает выровнять заряд с исследуемым сигналом.**
 
-## Программирование оцифровки сигнала
+## Оцифровка сигнала
 
+
+### Циклический индексатор
 Так как нужно реализовать **циклическое** аналого-цифровое преобразование сигнала со всех 8
 аналоговых выводов, реализуем примитив "Циклический индексатор", который будет хранить
 текущий индекс элемента массива и осуществлять по команде "Шаг вперед" переход в начало
 массива в случае, когда текущий индекс достиг конца массива.
-
-### Циклический индексатор
 
 ```
 #pragma once
@@ -214,14 +214,17 @@ class TRingIndex {
 
     TRingIndex (uint8_t size): sz(size), idx(0) { }
 
+    // Возвращает размер массива
     inline uint8_t size() {
         return sz;
     }
 
+    // Вычисляет индекс элемента, отстоящего на fwd позиций вперед
     inline uint8_t CalcFwd (const uint8_t& fwd = 1) {
         return (idx + fwd) % sz;
     }
 
+    // Производит перемещение текущей позиции на fwd позиций вперед
     inline void Fwd (const uint8_t& fwd = 1) {
         idx = CalcFwd(fwd);
     }
@@ -229,6 +232,87 @@ class TRingIndex {
 ```
 
 
+
+
+
+## Передача телеметрии в блок управления
+
+### Циклический буфер
+Для временного хранения передаваемых в блок управления данных используем примитив
+"Циклический буфер". Он подходит нам потому, что добавление и удаление данных в начало и в
+конец его происходит за постоянное время.
+
+```
+#pragma once
+
+#include "RingIndex.h"
+#include <inttypes.h>
+
+#ifndef RING_BUFFER_CAPACITY
+#define RING_BUFFER_CAPACITY 16
+#endif
+
+class TRingBuffer {
+    protected:
+        uint8_t data[RING_BUFFER_CAPACITY];     // Буфер
+        TRingIndex head{RING_BUFFER_CAPACITY};  // Кольцевой индексатор головы буфера
+        TRingIndex tail{RING_BUFFER_CAPACITY};  // Кольцевой индексатор хвоста буфера
+
+    public:
+        // Возвращает количество элементов выделенных под кольцевой буфер
+        inline uint8_t capacity () {
+            return static_cast<uint8_t>(RING_BUFFER_CAPACITY) - 1;
+        }
+
+        // Проверка на пустоту буфера
+        inline bool IsEmpty() {
+            return head.idx == tail.idx;
+        }
+
+        // Проверка на заполненность буфера
+        inline bool IsFull() {
+            return head.CalcFwd(1) == tail.idx;
+        }
+
+        // Количество элементов в буфере
+        inline uint8_t size() {
+            return (head.idx + (static_cast<uint8_t>(RING_BUFFER_CAPACITY) - tail.idx)) % static_cast<uint8_t>(RING_BUFFER_CAPACITY);
+        }
+
+        // Сколько элементов может еще поместиться в буфер
+        inline uint8_t FreeSpace() {
+            return capacity() - size();
+        }
+
+        // Помещает элемент в буфер
+        inline bool Put(uint8_t ch) {
+            if (IsFull())
+                return false;
+            data[head.idx] = ch;
+            head.Fwd(1);
+            return true;
+        }
+
+        // Достает элемент из буфера
+        inline bool Get(uint8_t& ch) {
+            if (IsEmpty())
+                return false;
+            ch = data[tail.idx];
+            tail.Fwd(1);
+            return true;
+        }
+
+        // Возвращает копию элемента, находящегося на расстоянии idx впереди от хвоста
+        inline uint8_t& PeekT (uint8_t idx) {
+            return data[tail.CalcFwd(idx)];
+        }
+
+        // Возвращает копию элемента, находящегося на расстоянии idx впереди от головы
+        inline uint8_t& PeekH (uint8_t idx) {
+            return data[head.CalcFwd(idx)];
+        }
+};
+```
 
 
 
